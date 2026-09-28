@@ -1,0 +1,10 @@
+/web/node_modules/
+/web/dist/
+*.test
+coverage.out
+.env
+.env.*
+!.env.example
+.pi
+openspec
+.codegraph
