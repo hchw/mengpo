@@ -26,8 +26,41 @@ type MemoryNodeRecord struct {
 	ContentText      string
 	DefaultRetrieval bool
 	Version          int64
+	Provenance       json.RawMessage
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	ExpiresAt        *time.Time
+	DeletedAt        *time.Time
+}
+
+type MemoryGovernanceAuditRecord struct {
+	ID           string
+	ActorType    string
+	ActorID      string
+	Action       string
+	ResourceType string
+	ResourceID   string
+	RequestID    string
+	Changes      json.RawMessage
+	CreatedAt    time.Time
+}
+
+type MemoryGovernanceMutationRecord struct {
+	Action              string
+	ExpectedVersion     int64
+	Memory              MemoryNodeRecord
+	Replacement         *MemoryNodeRecord
+	Relation            *MemoryRelationRecord
+	Audit               MemoryGovernanceAuditRecord
+	PurgeDerivedData    bool
+	InvalidateEmbedding bool
+}
+
+type MemoryGovernanceMutationResult struct {
+	Memory      MemoryNodeRecord
+	Replacement *MemoryNodeRecord
+	Relation    *MemoryRelationRecord
+	Audit       MemoryGovernanceAuditRecord
 }
 
 type MemoryRelationRecord struct {
@@ -49,4 +82,9 @@ type MemoryNodeRepository interface {
 	Get(ctx context.Context, tenantID, nodeID string) (MemoryNodeRecord, error)
 	Update(ctx context.Context, tenantID string, node MemoryNodeRecord, expectedVersion int64) (MemoryNodeRecord, error)
 	LoadScopeTree(ctx context.Context, tenantID, userID, sessionID string, maxParentDepth, limit int) (MemoryScopeTree, error)
+}
+
+type MemoryGovernanceMutationRepository interface {
+	LookupGovernanceMutation(ctx context.Context, tenantID, auditID, resourceID, actorType, actorID, action, requestID string) (MemoryGovernanceMutationResult, bool, error)
+	ApplyGovernanceMutation(ctx context.Context, tenantID string, mutation MemoryGovernanceMutationRecord) (MemoryGovernanceMutationResult, error)
 }

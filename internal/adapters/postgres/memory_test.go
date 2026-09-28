@@ -72,6 +72,20 @@ func TestMemoryRepositoryIdempotencyOptimisticLockAndTenantIsolation(t *testing.
 	if idempotent.ID != created.ID || string(idempotent.Content) != string(created.Content) {
 		t.Fatalf("idempotent replay returned %#v, want original %#v", idempotent, created)
 	}
+	conflictingReplay := original
+	conflictingReplay.ID = "00000000-0000-4000-8000-000000000103"
+	conflictingReplay.UserID = "00000000-0000-4000-8000-000000000002"
+	conflictingReplay.ScopeID = conflictingReplay.UserID
+	if _, err := repository.Create(ctx, tenantA.ID, conflictingReplay); !errors.Is(err, ErrMemoryScopeMismatch) {
+		t.Fatalf("cross-user idempotency replay error = %v, want ErrMemoryScopeMismatch", err)
+	}
+	invalidDimension := original
+	invalidDimension.ID = "00000000-0000-4000-8000-000000000104"
+	invalidDimension.IdempotencyKey = "candidate:workflow-scope"
+	invalidDimension.ScopeType = "workflow"
+	if _, err := repository.Create(ctx, tenantA.ID, invalidDimension); !errors.Is(err, ErrInvalidMemory) {
+		t.Fatalf("workflow memory dimension error = %v, want ErrInvalidMemory", err)
+	}
 
 	updatedInput := created
 	updatedInput.Status = "active"
@@ -124,13 +138,15 @@ func TestLoadScopeTreeEnforcesScopesAndParentDepth(t *testing.T) {
 	otherUserID := "00000000-0000-4000-8000-000000000002"
 	sessionID := "00000000-0000-4000-8000-000000000011"
 	otherSessionID := "00000000-0000-4000-8000-000000000012"
+	foreignSessionID := "00000000-0000-4000-8000-000000000013"
 	if err := tenantdb.NewRouter(db, store).WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
 		for _, id := range []string{sessionID, otherSessionID} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status) VALUES ($1, $2, 'active')`, id, userID); err != nil {
 				return err
 			}
 		}
-		return nil
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status) VALUES ($1, $2, 'active')`, foreignSessionID, otherUserID)
+		return err
 	}); err != nil {
 		t.Fatalf("insert sessions: %v", err)
 	}
@@ -154,6 +170,13 @@ func TestLoadScopeTreeEnforcesScopesAndParentDepth(t *testing.T) {
 	createNode("00000000-0000-4000-8000-000000000204", "tree:other-user", otherUserID, "", "user-global", otherUserID, "", "stable", true)
 	createNode("00000000-0000-4000-8000-000000000205", "tree:other-session", userID, otherSessionID, "session", otherSessionID, "", "stable", true)
 	createNode("00000000-0000-4000-8000-000000000206", "tree:candidate", userID, "", "user-global", userID, "", "candidate", true)
+	if _, err := repository.Create(ctx, tenant.ID, ports.MemoryNodeRecord{
+		ID: "00000000-0000-4000-8000-000000000207", IdempotencyKey: "tree:foreign-session",
+		UserID: userID, SessionID: foreignSessionID, ScopeType: "session", ScopeID: foreignSessionID,
+		MemoryType: "fact", Status: "active", Confidence: 0.9, Content: json.RawMessage(`{"text":"must be rejected"}`),
+	}); !errors.Is(err, ErrMemoryScopeMismatch) {
+		t.Fatalf("Create() with another user's session error = %v, want ErrMemoryScopeMismatch", err)
+	}
 
 	if err := tenantdb.NewRouter(db, store).WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO memory_relations (id, source_memory_id, target_memory_id, relation_type) VALUES ($1, $2, $3, 'related')`,
@@ -186,6 +209,13 @@ func TestLoadScopeTreeEnforcesScopesAndParentDepth(t *testing.T) {
 	}
 	if _, err := repository.LoadScopeTree(ctx, tenant.ID, userID, sessionID, MaxParentDepth+1, 100); !errors.Is(err, ErrInvalidScopeTree) {
 		t.Fatalf("excessive parent depth error = %v, want ErrInvalidScopeTree", err)
+	}
+	foreignTree, err := repository.LoadScopeTree(ctx, tenant.ID, userID, foreignSessionID, 1, 100)
+	if err != nil {
+		t.Fatalf("LoadScopeTree(foreign session) error = %v", err)
+	}
+	if len(foreignTree.Nodes) != 0 {
+		t.Fatalf("foreign session leaked %d memory nodes", len(foreignTree.Nodes))
 	}
 }
 

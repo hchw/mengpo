@@ -69,6 +69,7 @@ func (r *EmbeddingRepository) SearchSimilar(ctx context.Context, tenantID, userI
 			WHERE user_id = $5::uuid
 			  AND ((scope_type = 'user-global' AND scope_id = $5::uuid)
 			    OR (scope_type = 'session' AND session_id = NULLIF($6, '')::uuid))
+AND ($6 = '' OR EXISTS (SELECT 1 FROM sessions AS requested_session WHERE requested_session.id = NULLIF($6, '')::uuid AND requested_session.user_id = $5::uuid))
 			  AND status IN ('active', 'stable')
 			  AND default_retrieval = true
 			  AND deleted_at IS NULL

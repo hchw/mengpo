@@ -14,10 +14,11 @@ import (
 )
 
 var (
-	ErrMemoryNotFound   = errors.New("memory node not found")
-	ErrVersionConflict  = errors.New("memory node version conflict")
-	ErrInvalidMemory    = errors.New("invalid memory node")
-	ErrInvalidScopeTree = errors.New("invalid memory scope tree query")
+	ErrMemoryNotFound      = errors.New("memory node not found")
+	ErrVersionConflict     = errors.New("memory node version conflict")
+	ErrInvalidMemory       = errors.New("invalid memory node")
+	ErrMemoryScopeMismatch = errors.New("memory scope does not match owner")
+	ErrInvalidScopeTree    = errors.New("invalid memory scope tree query")
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 
 const memoryNodeColumns = `id, idempotency_key, user_id, session_id, scope_type, scope_id,
 parent_id, memory_type, status, visibility, confidence, applicability, content,
-content_text, default_retrieval, version, created_at, updated_at`
+content_text, default_retrieval, version, created_at, updated_at, provenance, expires_at, deleted_at`
 
 type MemoryRepository struct {
 	router *tenantdb.Router
@@ -42,10 +43,19 @@ func (r *MemoryRepository) Create(ctx context.Context, tenantID string, node por
 		node.ScopeType == "" || node.MemoryType == "" || node.Status == "" || !json.Valid(node.Content) {
 		return ports.MemoryNodeRecord{}, ErrInvalidMemory
 	}
+	if !validMemoryScope(node) {
+		return ports.MemoryNodeRecord{}, ErrInvalidMemory
+	}
 	if len(node.Applicability) == 0 {
 		node.Applicability = json.RawMessage(`{}`)
 	}
 	if !json.Valid(node.Applicability) {
+		return ports.MemoryNodeRecord{}, ErrInvalidMemory
+	}
+	if len(node.Provenance) == 0 {
+		node.Provenance = json.RawMessage(`{}`)
+	}
+	if !json.Valid(node.Provenance) {
 		return ports.MemoryNodeRecord{}, ErrInvalidMemory
 	}
 	if node.Visibility == "" {
@@ -55,19 +65,29 @@ func (r *MemoryRepository) Create(ctx context.Context, tenantID string, node por
 	now := time.Now().UTC()
 	var result ports.MemoryNodeRecord
 	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		if node.ScopeType == "session" {
+			var ownerID string
+			err := tx.QueryRowContext(ctx, `SELECT user_id FROM sessions WHERE id = $1`, node.SessionID).Scan(&ownerID)
+			if errors.Is(err, sql.ErrNoRows) || err == nil && ownerID != node.UserID {
+				return ErrMemoryScopeMismatch
+			}
+			if err != nil {
+				return fmt.Errorf("verify session memory owner: %w", err)
+			}
+		}
 		inserted, err := tx.ExecContext(ctx, `
 			INSERT INTO memory_nodes (
 				id, idempotency_key, user_id, session_id, scope_type, scope_id, parent_id,
 				memory_type, status, visibility, confidence, applicability, content,
-				content_text, default_retrieval, version, created_at, updated_at
+				content_text, default_retrieval, version, created_at, updated_at, provenance
 			) VALUES (
 				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb,
-				$14, $15, 1, $16, $16
+				$14, $15, 1, $16, $16, $17::jsonb
 			) ON CONFLICT (idempotency_key) DO NOTHING`,
 			node.ID, node.IdempotencyKey, node.UserID, nullable(node.SessionID), node.ScopeType,
 			node.ScopeID, nullable(node.ParentID), node.MemoryType, node.Status, node.Visibility,
 			node.Confidence, string(node.Applicability), string(node.Content), node.ContentText,
-			node.DefaultRetrieval, now)
+			node.DefaultRetrieval, now, string(node.Provenance))
 		if err != nil {
 			return fmt.Errorf("insert memory node: %w", err)
 		}
@@ -77,7 +97,13 @@ func (r *MemoryRepository) Create(ctx context.Context, tenantID string, node por
 		}
 		if rows == 0 {
 			result, err = getByIdempotencyKey(ctx, tx, node.IdempotencyKey)
-			return err
+			if err != nil {
+				return err
+			}
+			if result.UserID != node.UserID || result.ScopeType != node.ScopeType || result.ScopeID != node.ScopeID {
+				return ErrMemoryScopeMismatch
+			}
+			return nil
 		}
 		result, err = getMemory(ctx, tx, node.ID)
 		return err
@@ -158,6 +184,7 @@ func (r *MemoryRepository) LoadScopeTree(ctx context.Context, tenantID, userID, 
 			WHERE m.user_id = $1::uuid
 			  AND ((m.scope_type = 'user-global' AND m.scope_id = $1::uuid)
 			    OR (m.scope_type = 'session' AND m.session_id = NULLIF($2, '')::uuid))
+AND ($2 = '' OR EXISTS (SELECT 1 FROM sessions AS requested_session WHERE requested_session.id = NULLIF($2, '')::uuid AND requested_session.user_id = $1::uuid))
 			  AND m.status IN ('active', 'stable')
 			  AND m.deleted_at IS NULL
 			  AND (m.expires_at IS NULL OR m.expires_at > now())
@@ -254,12 +281,13 @@ func placeholders(ids []string, offset int) (string, []any) {
 func scanMemoryWithDepth(row rowScanner) (ports.MemoryNodeRecord, error) {
 	var node ports.MemoryNodeRecord
 	var sessionID, parentID sql.NullString
-	var applicability, content []byte
+	var expiresAt, deletedAt sql.NullTime
+	var applicability, content, provenance []byte
 	err := row.Scan(
 		&node.ID, &node.IdempotencyKey, &node.UserID, &sessionID, &node.ScopeType, &node.ScopeID,
 		&parentID, &node.MemoryType, &node.Status, &node.Visibility, &node.Confidence,
 		&applicability, &content, &node.ContentText, &node.DefaultRetrieval, &node.Version,
-		&node.CreatedAt, &node.UpdatedAt, &node.ParentDepth,
+		&node.CreatedAt, &node.UpdatedAt, &provenance, &expiresAt, &deletedAt, &node.ParentDepth,
 	)
 	if err != nil {
 		return ports.MemoryNodeRecord{}, err
@@ -272,6 +300,13 @@ func scanMemoryWithDepth(row rowScanner) (ports.MemoryNodeRecord, error) {
 	}
 	node.Applicability = append(json.RawMessage(nil), applicability...)
 	node.Content = append(json.RawMessage(nil), content...)
+	node.Provenance = append(json.RawMessage(nil), provenance...)
+	if expiresAt.Valid {
+		node.ExpiresAt = &expiresAt.Time
+	}
+	if deletedAt.Valid {
+		node.DeletedAt = &deletedAt.Time
+	}
 	return node, nil
 }
 
@@ -304,12 +339,13 @@ type rowScanner interface {
 func scanMemory(row rowScanner) (ports.MemoryNodeRecord, error) {
 	var node ports.MemoryNodeRecord
 	var sessionID, parentID sql.NullString
-	var applicability, content []byte
+	var expiresAt, deletedAt sql.NullTime
+	var applicability, content, provenance []byte
 	err := row.Scan(
 		&node.ID, &node.IdempotencyKey, &node.UserID, &sessionID, &node.ScopeType, &node.ScopeID,
 		&parentID, &node.MemoryType, &node.Status, &node.Visibility, &node.Confidence,
 		&applicability, &content, &node.ContentText, &node.DefaultRetrieval, &node.Version,
-		&node.CreatedAt, &node.UpdatedAt,
+		&node.CreatedAt, &node.UpdatedAt, &provenance, &expiresAt, &deletedAt,
 	)
 	if err != nil {
 		return ports.MemoryNodeRecord{}, err
@@ -322,7 +358,25 @@ func scanMemory(row rowScanner) (ports.MemoryNodeRecord, error) {
 	}
 	node.Applicability = append(json.RawMessage(nil), applicability...)
 	node.Content = append(json.RawMessage(nil), content...)
+	node.Provenance = append(json.RawMessage(nil), provenance...)
+	if expiresAt.Valid {
+		node.ExpiresAt = &expiresAt.Time
+	}
+	if deletedAt.Valid {
+		node.DeletedAt = &deletedAt.Time
+	}
 	return node, nil
+}
+
+func validMemoryScope(node ports.MemoryNodeRecord) bool {
+	switch node.ScopeType {
+	case "user-global":
+		return node.ScopeID == node.UserID && node.SessionID == ""
+	case "session":
+		return node.SessionID != "" && node.ScopeID == node.SessionID
+	default:
+		return false
+	}
 }
 
 func nullable(value string) any {

@@ -7,3 +7,4 @@ coverage.out
 !.env.example
 .pi
 openspec
+.codegraph

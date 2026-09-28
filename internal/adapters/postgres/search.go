@@ -52,6 +52,7 @@ func (r *SearchRepository) Search(ctx context.Context, tenantID, userID, session
 		const filters = `user_id = $1::uuid
 			AND ((scope_type = 'user-global' AND scope_id = $1::uuid)
 				OR (scope_type = 'session' AND session_id = NULLIF($2, '')::uuid))
+AND ($2 = '' OR EXISTS (SELECT 1 FROM sessions AS requested_session WHERE requested_session.id = NULLIF($2, '')::uuid AND requested_session.user_id = $1::uuid))
 			AND status IN ('active', 'stable')
 			AND default_retrieval = true
 			AND deleted_at IS NULL
@@ -97,13 +98,14 @@ func (r *SearchRepository) Search(ctx context.Context, tenantID, userID, session
 func scanMemoryWithScore(row rowScanner) (ports.MemoryNodeRecord, float64, error) {
 	var node ports.MemoryNodeRecord
 	var sessionID, parentID sql.NullString
-	var applicability, content []byte
+	var expiresAt, deletedAt sql.NullTime
+	var applicability, content, provenance []byte
 	var score float64
 	err := row.Scan(
 		&node.ID, &node.IdempotencyKey, &node.UserID, &sessionID, &node.ScopeType, &node.ScopeID,
 		&parentID, &node.MemoryType, &node.Status, &node.Visibility, &node.Confidence,
 		&applicability, &content, &node.ContentText, &node.DefaultRetrieval, &node.Version,
-		&node.CreatedAt, &node.UpdatedAt, &score,
+		&node.CreatedAt, &node.UpdatedAt, &provenance, &expiresAt, &deletedAt, &score,
 	)
 	if err != nil {
 		return ports.MemoryNodeRecord{}, 0, err
@@ -116,5 +118,12 @@ func scanMemoryWithScore(row rowScanner) (ports.MemoryNodeRecord, float64, error
 	}
 	node.Applicability = append(node.Applicability[:0], applicability...)
 	node.Content = append(node.Content[:0], content...)
+	node.Provenance = append(node.Provenance[:0], provenance...)
+	if expiresAt.Valid {
+		node.ExpiresAt = &expiresAt.Time
+	}
+	if deletedAt.Valid {
+		node.DeletedAt = &deletedAt.Time
+	}
 	return node, score, nil
 }

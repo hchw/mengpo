@@ -49,13 +49,15 @@ func TestEmbeddingMigrationWriteAndScopedVectorSearch(t *testing.T) {
 	otherUserID := "00000000-0000-4000-8000-000000000002"
 	sessionID := "00000000-0000-4000-8000-000000000011"
 	otherSessionID := "00000000-0000-4000-8000-000000000012"
+	foreignSessionID := "00000000-0000-4000-8000-000000000013"
 	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
 		for _, id := range []string{sessionID, otherSessionID} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status) VALUES ($1, $2, 'active')`, id, userID); err != nil {
 				return err
 			}
 		}
-		return nil
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status) VALUES ($1, $2, 'active')`, foreignSessionID, otherUserID)
+		return err
 	}); err != nil {
 		t.Fatalf("insert sessions: %v", err)
 	}
@@ -100,6 +102,14 @@ func TestEmbeddingMigrationWriteAndScopedVectorSearch(t *testing.T) {
 	}
 	if len(nearest) != 3 {
 		t.Fatalf("vector search returned %d candidates, want 3: %#v", len(nearest), nearest)
+	}
+	foreignSessionResults, err := embeddings.SearchSimilar(ctx, tenant.ID, userID, foreignSessionID,
+		"all-MiniLM-L6-v2", "all-MiniLM-L6-v2-Q8_0.gguf", "q8-v1", makeVector(0), 10)
+	if err != nil {
+		t.Fatalf("SearchSimilar(foreign session): %v", err)
+	}
+	if len(foreignSessionResults) != 0 {
+		t.Fatalf("vector search with foreign session returned %d candidates", len(foreignSessionResults))
 	}
 	if nearest[0].Node.ID != fixtures[0].id || nearest[0].Distance > 0.001 {
 		t.Fatalf("nearest vector result = %#v, want exact matching memory first", nearest[0])

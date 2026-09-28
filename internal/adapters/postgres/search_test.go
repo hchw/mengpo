@@ -48,13 +48,15 @@ func TestSearchScopesFiltersPaginatesAndUsesFullTextIndex(t *testing.T) {
 	otherUserID := "00000000-0000-4000-8000-000000000002"
 	sessionID := "00000000-0000-4000-8000-000000000011"
 	otherSessionID := "00000000-0000-4000-8000-000000000012"
+	foreignSessionID := "00000000-0000-4000-8000-000000000013"
 	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
 		for _, id := range []string{sessionID, otherSessionID} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status) VALUES ($1, $2, 'active')`, id, userID); err != nil {
 				return err
 			}
 		}
-		return nil
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status) VALUES ($1, $2, 'active')`, foreignSessionID, otherUserID)
+		return err
 	}); err != nil {
 		t.Fatalf("insert sessions: %v", err)
 	}
@@ -115,6 +117,13 @@ func TestSearchScopesFiltersPaginatesAndUsesFullTextIndex(t *testing.T) {
 	}
 	if globalOnly.Total != 2 {
 		t.Fatalf("global-only search total = %d, want 2", globalOnly.Total)
+	}
+	foreignSessionSearch, err := search.Search(ctx, tenant.ID, userID, foreignSessionID, ports.MemorySearchRequest{Query: "database"})
+	if err != nil {
+		t.Fatalf("search with foreign session: %v", err)
+	}
+	if foreignSessionSearch.Total != 0 {
+		t.Fatalf("foreign session returned %d results, want none", foreignSessionSearch.Total)
 	}
 	if _, err := search.Search(ctx, tenant.ID, userID, sessionID, ports.MemorySearchRequest{PageSize: MaxSearchPageSize + 1}); !errors.Is(err, ErrInvalidSearchPage) {
 		t.Fatalf("oversized page error = %v, want ErrInvalidSearchPage", err)
