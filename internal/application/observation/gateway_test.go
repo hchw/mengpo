@@ -48,6 +48,7 @@ func TestGatewayAdaptsAllObservationSources(t *testing.T) {
 		{"workflow", gateway.IngestWorkflow, observation.SourceWorkflow, "workflow.event"},
 		{"code", gateway.IngestCode, observation.SourceAgent, "code.event"},
 		{"feedback", gateway.IngestFeedback, observation.SourceUser, "feedback"},
+		{"gateway", gateway.IngestGateway, observation.SourceGateway, "gateway.event"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,5 +147,83 @@ func TestGatewayRequiresTrustedTenantAndSource(t *testing.T) {
 	_, _, err := gateway.IngestMessage(context.Background(), Principal{SourceID: "source"}, Input{})
 	if err != ErrInvalidPrincipal {
 		t.Fatalf("error = %v, want %v", err, ErrInvalidPrincipal)
+	}
+}
+
+// TestGatewayKeepsDeclaredMessageType proves a caller-declared event type is
+// preserved (it used to be silently overwritten with "message"), that the
+// default still applies when the caller declares none, and that the declared
+// type is what finally drives rule-based detection at the ingress.
+func TestGatewayKeepsDeclaredMessageType(t *testing.T) {
+	repo := &memoryRepository{}
+	gateway := NewGateway(repo)
+	gateway.newID = func() (string, error) { return "00000000-0000-4000-8000-000000000002", nil }
+	principal := Principal{TenantID: "trusted-tenant", SourceID: "trusted-source", AccessLevel: observation.Level1, AgentBound: true}
+	base := Input{IdempotencyKey: "key-1", SessionID: "session", Payload: json.RawMessage(`{}`), OccurredAt: time.Now(), Visibility: observation.VisibilitySession, Reliability: observation.ReliabilityHigh, RetentionClass: "standard"}
+
+	declared := base
+	declared.IdempotencyKey = "key-declared"
+	declared.MessageType = "tool.failure"
+	event, _, err := gateway.IngestTool(context.Background(), principal, declared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.MessageType != "tool.failure" {
+		t.Fatalf("declared message type = %q, want tool.failure", event.MessageType)
+	}
+	if event.SourceType != observation.SourceTool {
+		t.Fatalf("source type = %q, want tool", event.SourceType)
+	}
+	if task, required := observation.AnalysisTask(event); !required || task != observation.TaskFailureAnalysis {
+		t.Fatalf("AnalysisTask() = (%q, %v), want failure analysis", task, required)
+	}
+
+	omitted := base
+	omitted.IdempotencyKey = "key-omitted"
+	fallback, _, err := gateway.IngestMessage(context.Background(), principal, omitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallback.MessageType != "message" {
+		t.Fatalf("default message type = %q, want message", fallback.MessageType)
+	}
+}
+
+// TestGatewayDeclaredEventTypeIsReachableOverIngress records the behaviour change
+// this change introduces: a user-source event that expresses its meaning only
+// through the declared event type now reaches rule-based detection. Before, the
+// type was overwritten with "message" and such an event could never be detected.
+func TestGatewayDeclaredEventTypeIsReachableOverIngress(t *testing.T) {
+	repo := &memoryRepository{}
+	gateway := NewGateway(repo)
+	gateway.newID = func() (string, error) { return "00000000-0000-4000-8000-000000000003", nil }
+	principal := Principal{TenantID: "trusted-tenant", SourceID: "trusted-source", AccessLevel: observation.Level1, UserBound: true}
+
+	correction := Input{
+		IdempotencyKey: "key-correction", SessionID: "session", MessageType: "user_correction",
+		Payload: json.RawMessage(`{}`), OccurredAt: time.Now(),
+		Visibility: observation.VisibilityPrivate, Reliability: observation.ReliabilityUnknown, RetentionClass: "standard",
+	}
+	event, _, err := gateway.IngestMessage(context.Background(), principal, correction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.MessageType != "user_correction" {
+		t.Fatalf("message type = %q, want the declared user_correction", event.MessageType)
+	}
+	if task, required := observation.AnalysisTask(event); !required || task != observation.TaskConsolidation {
+		t.Fatalf("AnalysisTask() = (%q, %v), want consolidation from the declared type alone", task, required)
+	}
+
+	// An ordinary message with no declared type still stays out of the model path.
+	ordinary := correction
+	ordinary.IdempotencyKey = "key-ordinary"
+	ordinary.MessageType = ""
+	plain, _, err := gateway.IngestMessage(context.Background(), principal, ordinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task, required := observation.AnalysisTask(plain); required {
+		t.Fatalf("ordinary message must not require analysis, got %q", task)
 	}
 }

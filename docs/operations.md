@@ -181,6 +181,62 @@ Notes:
   console. Multi-replica executions are serialized with a PostgreSQL advisory
   lock, so a trigger runs at most once.
 
+### Deep runtime integration (Level 2 ingress)
+
+The `/api/v1/observe` payload accepts four optional fields that carry a deep
+runtime adapter's trace. They are optional, and an adapter that omits them keeps
+exactly the previous behaviour.
+
+| Field | Meaning |
+| --- | --- |
+| `source_type` | `user` (default), `agent`, `tool`, `workflow`, or `gateway`. Selects how the event is categorised; it does **not** affect authorization. |
+| `message_type` | The event type. It is now stored as declared; it used to be overwritten with `message`. |
+| `sequence` | Ordering within the session, so a reader can rebuild the original order. |
+| `parent_event_id` | The parent event, so a causal chain can be rebuilt. |
+| `trace` | `task_id`, `attempt_id`, `projection_id`, `used_memory_ids`, `tool_result_id`, `outcome_id`. |
+
+`/api/v1/project` returns `data.projection_id`, the identity of the projection
+that produced the response. Send it back inside `trace.projection_id` and the
+service derives `used_memory_ids` from the memories that projection actually
+exposed — the caller's own claim is never trusted. A cache hit returns the
+identity of the projection that produced the cached result, not a new one. A
+degraded projection (retrieval timeout or database unavailable) returns local
+session context rather than memories, and therefore carries no identifier.
+
+Attribution precision follows the trace: a complete trace records `direct`
+attribution, a session-only link records `inferred` with the missing links named,
+and no link at all records `unknown`. `direct` describes **link completeness, not
+correctness** — it does not change governance, promotion, or confidence.
+
+`/api/v1/project` also accepts an optional `scenario` object so the service, not
+the caller, decides how deep to look:
+
+| Field | Meaning |
+| --- | --- |
+| `clarity` | `clear` (default), `partial`, or `unclear`. |
+| `progress_percent` | 0–100. |
+| `repeated_failures` | Consecutive failures on the task. |
+| `conflict_count` | Conflicting evidence seen. |
+| `evidence_gap_count` | Missing evidence seen. |
+
+Repeated failures (≥2), any conflict, any evidence gap, an unclear task below
+50% progress, or a stalled partial task select **divergence**; otherwise recall
+stays **focused**. Out-of-range values are rejected with `INVALID_ENVELOPE`. A
+`memory_hint.mode` remains a bounded preference: a `focus` hint cannot cancel a
+safety-triggered divergence, and `memory_hint.allow_candidates: false` can
+withhold weak candidates but `true` cannot override policy.
+
+**Deployment order**: request decoding is strict (`DisallowUnknownFields`), so an
+older server rejects the new fields with `INVALID_ENVELOPE` (400). Deploy the
+server first; clients may then start sending them. Reverting the server is safe —
+the fields are simply ignored.
+
+**Behaviour change to expect**: clients that already sent `message_type` while it
+was ignored will now see their declared event type participate in rule-based
+detection. Events whose meaning was carried only by the event type (rather than
+by a payload marker) can therefore start producing analysis runs. Review
+analysis-run volume after upgrading.
+
 ## 4. Migrations
 
 Migrations live in `db/migrations/platform` and `db/migrations/tenant` and are

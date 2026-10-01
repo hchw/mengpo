@@ -60,15 +60,37 @@ func TestBinderAcceptsMatchingTenantAndRejectsCrossTenant(t *testing.T) {
 type fakeIngestor struct {
 	principal observation.Principal
 	input     observation.Input
+	source    obsdomain.SourceType
 	event     obsdomain.Event
 	created   bool
 	err       error
 }
 
-func (f *fakeIngestor) IngestMessage(_ context.Context, p observation.Principal, in observation.Input) (obsdomain.Event, bool, error) {
+func (f *fakeIngestor) record(p observation.Principal, in observation.Input, source obsdomain.SourceType) (obsdomain.Event, bool, error) {
 	f.principal = p
 	f.input = in
+	f.source = source
 	return f.event, f.created, f.err
+}
+
+func (f *fakeIngestor) IngestMessage(_ context.Context, p observation.Principal, in observation.Input) (obsdomain.Event, bool, error) {
+	return f.record(p, in, obsdomain.SourceUser)
+}
+
+func (f *fakeIngestor) IngestTool(_ context.Context, p observation.Principal, in observation.Input) (obsdomain.Event, bool, error) {
+	return f.record(p, in, obsdomain.SourceTool)
+}
+
+func (f *fakeIngestor) IngestWorkflow(_ context.Context, p observation.Principal, in observation.Input) (obsdomain.Event, bool, error) {
+	return f.record(p, in, obsdomain.SourceWorkflow)
+}
+
+func (f *fakeIngestor) IngestCode(_ context.Context, p observation.Principal, in observation.Input) (obsdomain.Event, bool, error) {
+	return f.record(p, in, obsdomain.SourceAgent)
+}
+
+func (f *fakeIngestor) IngestGateway(_ context.Context, p observation.Principal, in observation.Input) (obsdomain.Event, bool, error) {
+	return f.record(p, in, obsdomain.SourceGateway)
 }
 
 type fakeBinder struct {
@@ -252,5 +274,177 @@ func TestObserveQuarantinesCrossTenantEnvelope(t *testing.T) {
 	response, ok := result.(QuarantineResult)
 	if !ok || response.Reason != "cross-tenant-envelope" || len(quarantine.events) != 1 {
 		t.Fatalf("result=%#v events=%#v", result, quarantine.events)
+	}
+}
+
+// TestObserveDispatchesDeclaredSourceType proves a declared source category
+// reaches the matching ingest entry point, and that an omitted category keeps
+// the historical user-message path.
+func TestObserveDispatchesDeclaredSourceType(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    obsdomain.SourceType
+	}{
+		{"omitted defaults to user", `{"text":"hello"}`, obsdomain.SourceUser},
+		{"explicit user", `{"text":"hello","source_type":"user"}`, obsdomain.SourceUser},
+		{"tool", `{"source_type":"tool","message_type":"tool.result"}`, obsdomain.SourceTool},
+		{"workflow", `{"source_type":"workflow"}`, obsdomain.SourceWorkflow},
+		{"agent", `{"source_type":"agent"}`, obsdomain.SourceAgent},
+		{"gateway", `{"source_type":"gateway"}`, obsdomain.SourceGateway},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ingestor := &fakeIngestor{event: obsdomain.Event{ID: "event-1", TenantID: "tenant-a"}, created: true}
+			service := NewService(ServiceOptions{Gateway: ingestor})
+			ctx := WithIdentity(context.Background(), agentIdentity())
+			env := envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, tc.payload)
+			if _, err := service.Observe(ctx, env); err != nil {
+				t.Fatal(err)
+			}
+			if ingestor.source != tc.want {
+				t.Fatalf("source = %q, want %q", ingestor.source, tc.want)
+			}
+		})
+	}
+}
+
+// TestObserveRejectsUnknownSourceType proves an unsupported source category is a
+// payload validation failure (400), not a silent downgrade.
+func TestObserveRejectsUnknownSourceType(t *testing.T) {
+	ingestor := &fakeIngestor{event: obsdomain.Event{ID: "event-1"}, created: true}
+	service := NewService(ServiceOptions{Gateway: ingestor})
+	ctx := WithIdentity(context.Background(), agentIdentity())
+	env := envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{"source_type":"not-a-source"}`)
+	_, err := service.Observe(ctx, env)
+	if !errors.Is(err, dto.ErrInvalidEnvelope) {
+		t.Fatalf("err = %v, want invalid envelope", err)
+	}
+	if ingestor.source != "" {
+		t.Fatalf("rejected observation reached ingest: %q", ingestor.source)
+	}
+}
+
+// TestObserveForwardsDeclaredEventTypeAndTrace proves the declared event type,
+// ordering, causal link and runtime trace reach the observation boundary intact.
+func TestObserveForwardsDeclaredEventTypeAndTrace(t *testing.T) {
+	ingestor := &fakeIngestor{event: obsdomain.Event{ID: "event-1", TenantID: "tenant-a"}, created: true}
+	service := NewService(ServiceOptions{Gateway: ingestor})
+	ctx := WithIdentity(context.Background(), agentIdentity())
+	payload := `{"source_type":"tool","message_type":"tool.failure","sequence":7,"parent_event_id":"00000000-0000-4000-8000-000000000009","trace":{"task_id":"task-1","attempt_id":"attempt-2","projection_id":"00000000-0000-4000-8000-000000000001","tool_result_id":"call-3","outcome_id":"outcome-4"}}`
+	env := envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, payload)
+	if _, err := service.Observe(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	input := ingestor.input
+	if input.MessageType != "tool.failure" {
+		t.Fatalf("message type = %q", input.MessageType)
+	}
+	if input.Sequence == nil || *input.Sequence != 7 {
+		t.Fatalf("sequence = %v", input.Sequence)
+	}
+	if input.ParentEventID != "00000000-0000-4000-8000-000000000009" {
+		t.Fatalf("parent event = %q", input.ParentEventID)
+	}
+	trace := input.Trace
+	if trace.TaskID != "task-1" || trace.AttemptID != "attempt-2" || trace.ToolResultID != "call-3" || trace.OutcomeID != "outcome-4" || trace.ProjectionID != "00000000-0000-4000-8000-000000000001" {
+		t.Fatalf("trace = %#v", trace)
+	}
+}
+
+type fakeProjectionLookup struct {
+	lookup ports.ProjectionLookup
+	err    error
+	calls  int
+}
+
+func (f *fakeProjectionLookup) FindProjection(_ context.Context, _, _ string) (ports.ProjectionLookup, error) {
+	f.calls++
+	return f.lookup, f.err
+}
+
+func observeWithTrace(t *testing.T, service *Service, payload string) *fakeIngestor {
+	t.Helper()
+	ingestor := &fakeIngestor{event: obsdomain.Event{ID: "event-1", TenantID: "tenant-a"}, created: true}
+	service.gateway = ingestor
+	ctx := WithIdentity(context.Background(), agentIdentity())
+	env := envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, payload)
+	if _, err := service.Observe(ctx, env); err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	return ingestor
+}
+
+const projectionTracePayload = `{"source_type":"tool","trace":{"projection_id":"00000000-0000-4000-8000-000000000001","tool_result_id":"call-1"}}`
+
+// TestObserveDerivesUsedMemoryIDs proves used-memory identity comes from the
+// projection the caller referenced, not from the caller's own claim.
+func TestObserveDerivesUsedMemoryIDs(t *testing.T) {
+	lookup := &fakeProjectionLookup{lookup: ports.ProjectionLookup{
+		ID:                "00000000-0000-4000-8000-000000000001",
+		UserID:            "user-a",
+		SessionID:         "session-a",
+		SelectedMemoryIDs: []string{"memory-1", "memory-2"},
+	}}
+	service := NewService(ServiceOptions{Projections: lookup})
+	ingestor := observeWithTrace(t, service, projectionTracePayload)
+	if got := ingestor.input.Trace.UsedMemoryIDs; len(got) != 2 || got[0] != "memory-1" || got[1] != "memory-2" {
+		t.Fatalf("used memory ids = %v, want derived from projection", got)
+	}
+	if lookup.calls != 1 {
+		t.Fatalf("lookup calls = %d, want 1", lookup.calls)
+	}
+}
+
+// TestObserveKeepsCallerDeclaredUsedMemoryIDs proves an explicit set wins and the
+// projection is not consulted.
+func TestObserveKeepsCallerDeclaredUsedMemoryIDs(t *testing.T) {
+	lookup := &fakeProjectionLookup{lookup: ports.ProjectionLookup{UserID: "user-a", SelectedMemoryIDs: []string{"memory-1"}}}
+	service := NewService(ServiceOptions{Projections: lookup})
+	payload := `{"trace":{"projection_id":"00000000-0000-4000-8000-000000000001","used_memory_ids":["memory-explicit"]}}`
+	ingestor := observeWithTrace(t, service, payload)
+	if got := ingestor.input.Trace.UsedMemoryIDs; len(got) != 1 || got[0] != "memory-explicit" {
+		t.Fatalf("used memory ids = %v, want the caller's set", got)
+	}
+	if lookup.calls != 0 {
+		t.Fatalf("lookup calls = %d, want 0 when the caller declared its own set", lookup.calls)
+	}
+}
+
+// TestObserveIgnoresProjectionItCannotOwn proves a reference owned by another
+// user, or attached to another session, never contributes used-memory identity
+// and never fails the observation.
+func TestObserveIgnoresProjectionItCannotOwn(t *testing.T) {
+	cases := []struct {
+		name   string
+		lookup ports.ProjectionLookup
+	}{
+		{"another user", ports.ProjectionLookup{UserID: "user-b", SessionID: "session-a", SelectedMemoryIDs: []string{"memory-1"}}},
+		{"another session", ports.ProjectionLookup{UserID: "user-a", SessionID: "session-z", SelectedMemoryIDs: []string{"memory-1"}}},
+		{"no selected memories", ports.ProjectionLookup{UserID: "user-a", SessionID: "session-a"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lookup := &fakeProjectionLookup{lookup: tc.lookup}
+			service := NewService(ServiceOptions{Projections: lookup})
+			ingestor := observeWithTrace(t, service, projectionTracePayload)
+			if got := ingestor.input.Trace.UsedMemoryIDs; len(got) != 0 {
+				t.Fatalf("used memory ids = %v, want none", got)
+			}
+		})
+	}
+}
+
+// TestObserveIgnoresUnresolvableProjection proves an unknown reference is not
+// fabricated into used-memory identity, and does not fail the observation.
+func TestObserveIgnoresUnresolvableProjection(t *testing.T) {
+	lookup := &fakeProjectionLookup{err: ports.ErrProjectionNotFound}
+	service := NewService(ServiceOptions{Projections: lookup})
+	ingestor := observeWithTrace(t, service, projectionTracePayload)
+	if got := ingestor.input.Trace.UsedMemoryIDs; len(got) != 0 {
+		t.Fatalf("used memory ids = %v, want none", got)
+	}
+	if ingestor.input.Trace.ProjectionID != "00000000-0000-4000-8000-000000000001" {
+		t.Fatalf("projection reference = %q, want it preserved", ingestor.input.Trace.ProjectionID)
 	}
 }

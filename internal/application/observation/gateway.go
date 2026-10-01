@@ -125,9 +125,13 @@ func (g *Gateway) Ingest(ctx context.Context, principal Principal, input Input) 
 
 // These source adapters share the same validation and persistence path while
 // fixing the event category, avoiding caller-controlled source_type values.
+// Each keeps a caller-declared message type and only supplies a default when the
+// caller declared none.
 func (g *Gateway) IngestMessage(ctx context.Context, p Principal, in Input) (observation.Event, bool, error) {
 	p.SourceType = observation.SourceUser
-	in.MessageType = "message"
+	if in.MessageType == "" {
+		in.MessageType = "message"
+	}
 	return g.Ingest(ctx, p, in)
 }
 func (g *Gateway) IngestTool(ctx context.Context, p Principal, in Input) (observation.Event, bool, error) {
@@ -148,6 +152,16 @@ func (g *Gateway) IngestCode(ctx context.Context, p Principal, in Input) (observ
 	p.SourceType = observation.SourceAgent
 	if in.MessageType == "" {
 		in.MessageType = "code.event"
+	}
+	return g.Ingest(ctx, p, in)
+}
+
+// IngestGateway records an event observed at a gateway boundary rather than by
+// a user or an agent directly.
+func (g *Gateway) IngestGateway(ctx context.Context, p Principal, in Input) (observation.Event, bool, error) {
+	p.SourceType = observation.SourceGateway
+	if in.MessageType == "" {
+		in.MessageType = "gateway.event"
 	}
 	return g.Ingest(ctx, p, in)
 }

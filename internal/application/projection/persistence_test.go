@@ -19,6 +19,10 @@ func (f *fakeProjectionRepository) RecordProjection(_ context.Context, _ string,
 	f.event = event
 	return nil
 }
+func (f *fakeProjectionRepository) FindProjection(_ context.Context, _, _ string) (ports.ProjectionLookup, error) {
+	return ports.ProjectionLookup{}, ports.ErrProjectionNotFound
+}
+
 func (f *fakeProjectionRepository) GetProjectionCache(_ context.Context, _, key, _, _, _ string) (json.RawMessage, bool, error) {
 	entry, ok := f.cache[key]
 	if !ok || time.Now().After(entry.ExpiresAt) {
@@ -41,8 +45,10 @@ func TestPersistenceRecordsSelectionExclusionBudgetAndProvenance(t *testing.T) {
 	blocked := recall.RankedCandidate{RecallCandidate: ports.RecallCandidate{Node: ports.MemoryNodeRecord{ID: "00000000-0000-4000-8000-000000000702"}, Channels: []string{ports.RecallChannelVector}}, Included: false, ExcludedReason: "cross-session"}
 	budgetResult := BudgetResult{Selected: []Item{{Candidate: candidate, Text: "selected", TokenCost: 8}}, Excluded: []Item{{Candidate: blocked, ExcludedReason: "cross-session"}}, Usage: BudgetUsage{CandidatesSeen: 2, CandidatesRanked: 1, CandidatesInjected: 1, TokensInjected: 8}}
 	decision := Decision{Mode: ModeFocus, Reason: "task clear", Scope: CandidateScope{CandidateLimit: 10, RankingLimit: 5, InjectionTokenBudget: 100}}
-	if err := persistence.Record(context.Background(), "tenant", "req-1", "user-1", "", decision, []recall.RankedCandidate{candidate, blocked}, budgetResult, "reranker-unavailable"); err != nil {
+	if projectionID, err := persistence.Record(context.Background(), "tenant", "req-1", "user-1", "", decision, []recall.RankedCandidate{candidate, blocked}, budgetResult, "reranker-unavailable"); err != nil {
 		t.Fatal(err)
+	} else if projectionID == "" || projectionID != repo.event.ID {
+		t.Fatalf("Record() identifier = %q, want it to name the stored event %q", projectionID, repo.event.ID)
 	}
 	if repo.event.ID == "" || repo.event.RequestID != "req-1" || repo.event.Mode != "focus" || repo.event.DegradedMode != "reranker-unavailable" {
 		t.Fatalf("event metadata=%#v", repo.event)

@@ -33,8 +33,14 @@ type Consolidator interface {
 }
 
 // Ingestor is the raw observation boundary; *observation.Gateway satisfies it.
+// Each entry point fixes the event's source category so callers cannot spoof it
+// through the payload.
 type Ingestor interface {
 	IngestMessage(ctx context.Context, principal observation.Principal, input observation.Input) (obsdomain.Event, bool, error)
+	IngestTool(ctx context.Context, principal observation.Principal, input observation.Input) (obsdomain.Event, bool, error)
+	IngestWorkflow(ctx context.Context, principal observation.Principal, input observation.Input) (obsdomain.Event, bool, error)
+	IngestCode(ctx context.Context, principal observation.Principal, input observation.Input) (obsdomain.Event, bool, error)
+	IngestGateway(ctx context.Context, principal observation.Principal, input observation.Input) (obsdomain.Event, bool, error)
 }
 
 type ServiceOptions struct {
@@ -44,7 +50,16 @@ type ServiceOptions struct {
 	Feedback     FeedbackRecorder
 	Consolidator Consolidator
 	Quarantine   ports.QuarantineRepository
+	Projections  ProjectionLookup
 	NewID        func() (string, error)
+}
+
+// ProjectionLookup resolves a projection reference to the identity of the
+// caller that received it and the memories it exposed. It lets the service
+// derive used-memory identity from server-side evidence instead of trusting a
+// caller's own claim.
+type ProjectionLookup interface {
+	FindProjection(ctx context.Context, tenantID, projectionID string) (ports.ProjectionLookup, error)
 }
 
 type Service struct {
@@ -55,6 +70,7 @@ type Service struct {
 	feedback     FeedbackRecorder
 	consolidator Consolidator
 	quarantine   ports.QuarantineRepository
+	projections  ProjectionLookup
 	newID        func() (string, error)
 }
 
@@ -63,16 +79,40 @@ func NewService(options ServiceOptions) *Service {
 	if newID == nil {
 		newID = newUUID
 	}
-	return &Service{binder: NewBinder(), gateway: options.Gateway, sessions: options.Sessions, projector: options.Projector, feedback: options.Feedback, consolidator: options.Consolidator, quarantine: options.Quarantine, newID: newID}
+	return &Service{binder: NewBinder(), gateway: options.Gateway, sessions: options.Sessions, projector: options.Projector, feedback: options.Feedback, consolidator: options.Consolidator, quarantine: options.Quarantine, projections: options.Projections, newID: newID}
 }
 
 type ObservePayload struct {
 	SourceEventID  string          `json:"source_event_id"`
 	ConversationID string          `json:"conversation_id"`
+	SourceType     string          `json:"source_type"`
 	MessageType    string          `json:"message_type"`
+	Sequence       *int64          `json:"sequence"`
+	ParentEventID  string          `json:"parent_event_id"`
 	Text           string          `json:"text"`
 	Payload        json.RawMessage `json:"payload"`
+	Trace          obsdomain.Trace `json:"trace"`
 	OccurredAt     time.Time       `json:"occurred_at"`
+}
+
+// observeSource maps a declared source_type onto its observation entry point.
+// An empty value keeps the historical user-message default so existing callers
+// observe exactly what they observed before.
+func observeSource(raw string) (obsdomain.SourceType, error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", string(obsdomain.SourceUser):
+		return obsdomain.SourceUser, nil
+	case string(obsdomain.SourceAgent):
+		return obsdomain.SourceAgent, nil
+	case string(obsdomain.SourceTool):
+		return obsdomain.SourceTool, nil
+	case string(obsdomain.SourceWorkflow):
+		return obsdomain.SourceWorkflow, nil
+	case string(obsdomain.SourceGateway):
+		return obsdomain.SourceGateway, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported source_type %q", dto.ErrInvalidEnvelope, raw)
+	}
 }
 
 type SessionPayload struct {
@@ -156,23 +196,75 @@ func (s *Service) Observe(ctx context.Context, envelope dto.Envelope) (any, erro
 	if envelope.Privacy.Visibility == "tenant" {
 		visibility = obsdomain.VisibilityTenant
 	}
-	event, created, err := s.gateway.IngestMessage(ctx, principal, observation.Input{
+	source, err := observeSource(payload.SourceType)
+	if err != nil {
+		return nil, err
+	}
+	trace := payload.Trace
+	s.resolveUsedMemoryIDs(ctx, scoped, &trace)
+	input := observation.Input{
 		SourceEventID:  payload.SourceEventID,
 		IdempotencyKey: scoped.IdempotencyKey,
 		SessionID:      scoped.SessionID,
 		ConversationID: payload.ConversationID,
-		MessageType:    firstNonEmpty(payload.MessageType, "message"),
+		MessageType:    strings.TrimSpace(payload.MessageType),
+		Sequence:       payload.Sequence,
+		ParentEventID:  strings.TrimSpace(payload.ParentEventID),
 		Payload:        payload.Payload,
 		PayloadText:    payload.Text,
+		Trace:          trace,
 		OccurredAt:     payload.OccurredAt,
 		Visibility:     visibility,
 		Reliability:    obsdomain.ReliabilityUnknown,
 		RetentionClass: "standard",
-	})
+	}
+	var event obsdomain.Event
+	var created bool
+	switch source {
+	case obsdomain.SourceTool:
+		event, created, err = s.gateway.IngestTool(ctx, principal, input)
+	case obsdomain.SourceWorkflow:
+		event, created, err = s.gateway.IngestWorkflow(ctx, principal, input)
+	case obsdomain.SourceAgent:
+		event, created, err = s.gateway.IngestCode(ctx, principal, input)
+	case obsdomain.SourceGateway:
+		event, created, err = s.gateway.IngestGateway(ctx, principal, input)
+	default:
+		event, created, err = s.gateway.IngestMessage(ctx, principal, input)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return ObserveResult{EventID: event.ID, Created: created, TenantID: event.TenantID, SessionID: event.SessionID, RequestID: scoped.RequestID}, nil
+}
+
+// resolveUsedMemoryIDs fills the trace's used-memory identifiers from the
+// projection the caller referenced, so the identity comes from server-side
+// evidence rather than from a caller's claim.
+//
+// It deliberately stays silent on every failure mode: an unresolvable
+// reference, a reference owned by another user, or a session mismatch all leave
+// the identifiers empty and the observation is still accepted. The service
+// never fabricates used-memory identity, and never reveals anything about a
+// projection the caller does not own.
+func (s *Service) resolveUsedMemoryIDs(ctx context.Context, scoped Scoped, trace *obsdomain.Trace) {
+	if s.projections == nil || trace == nil || strings.TrimSpace(trace.ProjectionID) == "" || len(trace.UsedMemoryIDs) > 0 {
+		return
+	}
+	lookup, err := s.projections.FindProjection(ctx, scoped.TenantID, strings.TrimSpace(trace.ProjectionID))
+	if err != nil {
+		return
+	}
+	if lookup.UserID == "" || lookup.UserID != scoped.UserID {
+		return
+	}
+	if lookup.SessionID != "" && scoped.SessionID != "" && lookup.SessionID != scoped.SessionID {
+		return
+	}
+	if len(lookup.SelectedMemoryIDs) == 0 {
+		return
+	}
+	trace.UsedMemoryIDs = append([]string(nil), lookup.SelectedMemoryIDs...)
 }
 
 func (s *Service) Session(ctx context.Context, envelope dto.Envelope) (any, error) {

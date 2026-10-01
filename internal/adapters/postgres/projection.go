@@ -101,3 +101,63 @@ func uuidArrayLiteral(ids []string) string {
 	}
 	return "{" + strings.Join(quoted, ",") + "}"
 }
+
+// FindProjection resolves a caller-supplied projection reference inside the
+// tenant's schema. A reference that is malformed, unknown, or simply not there
+// is reported as ErrProjectionNotFound rather than as a server failure: the
+// caller may legitimately hold a reference from an environment this tenant no
+// longer has.
+func (r *ProjectionRepository) FindProjection(ctx context.Context, tenantID, projectionID string) (ports.ProjectionLookup, error) {
+	if tenantID == "" || !looksLikeUUID(projectionID) {
+		return ports.ProjectionLookup{}, ports.ErrProjectionNotFound
+	}
+	lookup := ports.ProjectionLookup{ID: projectionID}
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var sessionID string
+		var selected string
+		row := tx.QueryRowContext(ctx, `SELECT user_id::text, COALESCE(session_id::text, ''), COALESCE(array_to_string(selected_memory_ids, ','), '') FROM projection_events WHERE id = $1::uuid`, projectionID)
+		if err := row.Scan(&lookup.UserID, &sessionID, &selected); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ports.ErrProjectionNotFound
+			}
+			return fmt.Errorf("find projection: %w", err)
+		}
+		lookup.SessionID = sessionID
+		if selected != "" {
+			for _, id := range strings.Split(selected, ",") {
+				if id != "" {
+					lookup.SelectedMemoryIDs = append(lookup.SelectedMemoryIDs, id)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ports.ErrProjectionNotFound) {
+			return ports.ProjectionLookup{}, ports.ErrProjectionNotFound
+		}
+		return ports.ProjectionLookup{}, err
+	}
+	return lookup, nil
+}
+
+// looksLikeUUID keeps a malformed reference from reaching a uuid cast, which
+// would otherwise surface as a database error instead of "not found".
+func looksLikeUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}

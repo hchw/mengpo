@@ -35,7 +35,10 @@ type exclusionReason struct {
 	Channels []string `json:"channels,omitempty"`
 }
 
-func (p *Persistence) Record(ctx context.Context, tenantID, requestID, userID, sessionID string, decision Decision, ranked []recall.RankedCandidate, budgetResult BudgetResult, degradedMode string) error {
+// Record persists the projection event and returns the identifier it was stored
+// under, so the caller can hand that identity back to the client that received
+// this projection.
+func (p *Persistence) Record(ctx context.Context, tenantID, requestID, userID, sessionID string, decision Decision, ranked []recall.RankedCandidate, budgetResult BudgetResult, degradedMode string) (string, error) {
 	selected := make([]string, 0, len(budgetResult.Selected))
 	selection := map[string]selectionReason{}
 	provenance := map[string][]string{}
@@ -60,32 +63,35 @@ func (p *Persistence) Record(ctx context.Context, tenantID, requestID, userID, s
 	}
 	selectionJSON, err := json.Marshal(selection)
 	if err != nil {
-		return err
+		return "", err
 	}
 	excludedJSON, err := json.Marshal(excluded)
 	if err != nil {
-		return err
+		return "", err
 	}
 	provenanceJSON, err := json.Marshal(provenance)
 	if err != nil {
-		return err
+		return "", err
 	}
 	budgetJSON, err := json.Marshal(struct {
 		Limits CandidateScope `json:"limits"`
 		Usage  BudgetUsage    `json:"usage"`
 	}{Limits: decision.Scope, Usage: budgetResult.Usage})
 	if err != nil {
-		return err
+		return "", err
 	}
 	id, err := newUUID()
 	if err != nil {
-		return fmt.Errorf("generate projection event id: %w", err)
+		return "", fmt.Errorf("generate projection event id: %w", err)
 	}
 	mode := string(decision.Mode)
 	if mode != "focus" && mode != "diverge" {
-		return ports.ErrInvalidProjectionRecord
+		return "", ports.ErrInvalidProjectionRecord
 	}
-	return p.repository.RecordProjection(ctx, tenantID, ports.ProjectionEvent{ID: id, RequestID: requestID, UserID: userID, SessionID: sessionID, Mode: mode, SelectedIDs: selected, SelectionReasons: selectionJSON, ExcludedReasons: excludedJSON, Budget: budgetJSON, Provenance: provenanceJSON, DegradedMode: degradedMode})
+	if err := p.repository.RecordProjection(ctx, tenantID, ports.ProjectionEvent{ID: id, RequestID: requestID, UserID: userID, SessionID: sessionID, Mode: mode, SelectedIDs: selected, SelectionReasons: selectionJSON, ExcludedReasons: excludedJSON, Budget: budgetJSON, Provenance: provenanceJSON, DegradedMode: degradedMode}); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // CacheKey binds a projection result to tenant, user, session scope, query,

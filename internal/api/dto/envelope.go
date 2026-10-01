@@ -71,7 +71,7 @@ type MemoryHint struct {
 	Mode            string   `json:"mode,omitempty"` // auto | focus | diverge
 	Topics          []string `json:"topics,omitempty"`
 	MemoryIDs       []string `json:"memory_ids,omitempty"`
-	AllowCandidates bool     `json:"allow_candidates,omitempty"` // policy may still deny
+	AllowCandidates *bool    `json:"allow_candidates,omitempty"` // policy may still deny
 }
 
 type Budget struct {
