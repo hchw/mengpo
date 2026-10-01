@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import type { ConsoleApi } from '../api/console';
 import type {
+  ProviderUpdate as ProviderUpdateInput,
   AgentRecord,
   CandidateRecord,
   EvaluationSnapshot,
@@ -10,6 +11,9 @@ import type {
   Page,
   ProjectionDebug,
   SessionSummary,
+  AnalysisRun,
+  ProviderView,
+  ScheduleStatus,
 } from '../api/types';
 
 export function page<T>(items: T[], overrides: Partial<Page<T>> = {}): Page<T> {
@@ -110,6 +114,55 @@ export const projection = (overrides: Partial<ProjectionDebug> = {}): Projection
   ...overrides,
 });
 
+
+export function provider(overrides: Partial<ProviderView> = {}): ProviderView {
+  return {
+    provider: 'memory-llm',
+    enabled: false,
+    base_url: '',
+    model: '',
+    has_secret: false,
+    secret_hint: '',
+    source: 'disabled',
+    ...overrides,
+  };
+}
+
+export function scheduleStatus(overrides: Partial<ScheduleStatus> = {}): ScheduleStatus {
+  return {
+    name: 'consolidate',
+    cadence_seconds: 86400,
+    next_run_at: '2024-01-02T00:00:00Z',
+    last_run_at: '2024-01-01T00:00:00Z',
+    last_status: 'ok',
+    last_error: '',
+    runs: 3,
+    ...overrides,
+  };
+}
+
+export function analysisRun(id: string, overrides: Partial<AnalysisRun> = {}): AnalysisRun {
+  return {
+    id,
+    task_type: 'consolidate_memory',
+    trigger: 'schedule',
+    provider: 'memory-llm',
+    model: 'test-model',
+    prompt_version: 'llm-v1',
+    status: 'succeeded',
+    latency_ms: 12,
+    tokens_prompt: 100,
+    tokens_completion: 20,
+    candidate_count: 2,
+    discarded_count: 0,
+    conflict_count: 0,
+    degraded_reason: '',
+    last_error: '',
+    created_at: '2024-01-01T00:00:00Z',
+    ...overrides,
+  };
+}
+
 export function fakeConsoleApi(overrides: Partial<ConsoleApi> = {}): ConsoleApi {
   return {
     listSessions: vi.fn(async () => page([session('s1')])),
@@ -124,6 +177,12 @@ export function fakeConsoleApi(overrides: Partial<ConsoleApi> = {}): ConsoleApi 
     updateMemberRole: vi.fn(async (id: string, role: Member['role']) => member(id, { role })),
     listAgents: vi.fn(async () => page([agent('a1')])),
     disableAgent: vi.fn(async (id: string) => agent(id, { status: 'disabled' })),
+    getProvider: vi.fn(async () => provider()),
+    updateProvider: vi.fn(async (input: ProviderUpdateInput) => provider(input)),
+    testProvider: vi.fn(async () => ({ ok: true, latency_ms: 7, error: '' })),
+    listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
+    updateSchedule: vi.fn(async () => ({})),
+    listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1')] })),
     ...overrides,
   } as unknown as ConsoleApi;
 }

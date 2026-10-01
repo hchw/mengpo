@@ -61,6 +61,66 @@ func ApplyPlatformMigrations(ctx context.Context, db *sql.DB) error {
 	return migrations.ApplyPlatform(ctx, db)
 }
 
+// UpgradeTenantSchemas applies any pending tenant migrations to every enabled
+// tenant schema. New migrations are written long after a tenant was provisioned,
+// so this must run at startup: without it a rolling deploy upgrades only newly
+// provisioned tenants and existing ones keep the old columns. It is idempotent.
+func UpgradeTenantSchemas(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("database is required")
+	}
+	rows, err := db.QueryContext(ctx, `SELECT tenant_id::text, schema_name FROM public.tenant_schema_registry WHERE state = 'enabled' ORDER BY created_at`)
+	if err != nil {
+		return fmt.Errorf("list enabled tenant schemas: %w", err)
+	}
+	type target struct{ id, schema string }
+	var targets []target
+	for rows.Next() {
+		var item target
+		if err := rows.Scan(&item.id, &item.schema); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan tenant schema: %w", err)
+		}
+		targets = append(targets, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate tenant schemas: %w", err)
+	}
+	_ = rows.Close()
+	for _, item := range targets {
+		if !tenantSchemaPattern.MatchString(item.schema) {
+			return fmt.Errorf("refusing unsafe tenant schema name %q", item.schema)
+		}
+		if err := upgradeTenantSchema(ctx, db, item.id, item.schema); err != nil {
+			return fmt.Errorf("upgrade tenant schema %s: %w", item.schema, err)
+		}
+	}
+	return nil
+}
+
+func upgradeTenantSchema(ctx context.Context, db *sql.DB, tenantID, schema string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tenant migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('search_path', $1, true)`, schema+", public"); err != nil {
+		return fmt.Errorf("set tenant migration search_path: %w", err)
+	}
+	if err := migrations.ApplyTenant(ctx, tx, migrations.TenantFS()); err != nil {
+		return fmt.Errorf("apply tenant migrations: %w", err)
+	}
+	var version int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(max(version), 0) FROM tenant_migrations`).Scan(&version); err != nil {
+		return fmt.Errorf("read tenant migration version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE public.tenant_schema_registry SET migration_version = $1, updated_at = now() WHERE tenant_id = $2`, version, tenantID); err != nil {
+		return fmt.Errorf("record tenant migration version: %w", err)
+	}
+	return tx.Commit()
+}
+
 // RegisterTenant creates only platform metadata. Tenant memory operations remain
 // unavailable until the schema has been created/migrated and activated.
 func (s *Store) ProvisionTenant(ctx context.Context, name string) (auth.Tenant, error) {

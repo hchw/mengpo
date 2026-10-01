@@ -12,7 +12,7 @@ var ErrInvalidAnalysisResult = errors.New("analysis result failed evidence, scop
 
 // ValidateResult verifies model output against the exact tenant batch that was analyzed.
 func ValidateResult(batch ports.AnalysisBatch, result ports.AnalystResult) error {
-	if batch.TenantID == "" || batch.RunID == "" || len(batch.Events) == 0 {
+	if batch.TenantID == "" || batch.RunID == "" || (len(batch.Events) == 0 && len(batch.Candidates) == 0) {
 		return ErrInvalidBatch
 	}
 	events := make(map[string]ports.AnalysisEvent, len(batch.Events))
@@ -37,7 +37,14 @@ func ValidateResult(batch ports.AnalysisBatch, result ports.AnalystResult) error
 			}
 		}
 	}
-	candidateIDs := make(map[string]struct{}, len(result.Candidates))
+	candidateIDs := make(map[string]struct{}, len(result.Candidates)+len(batch.Candidates))
+	// Candidates already persisted and passed in for a conflict scan are valid
+	// conflict targets even though they are not part of this result.
+	for _, candidate := range batch.Candidates {
+		if candidate.CandidateID != "" {
+			candidateIDs[candidate.CandidateID] = struct{}{}
+		}
+	}
 	for _, candidate := range result.Candidates {
 		if candidate.CandidateID == "" || candidate.ScopeID == "" || len(candidate.EvidenceEventIDs) == 0 || !unit(candidate.Confidence) || len(candidate.Content) == 0 || !json.Valid(candidate.Content) {
 			return ErrInvalidAnalysisResult

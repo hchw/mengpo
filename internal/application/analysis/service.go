@@ -33,7 +33,7 @@ func NewWithPrivacy(providers Providers, policy PrivacyPolicy) *Service {
 }
 
 func (s *Service) Analyze(ctx context.Context, batch ports.AnalysisBatch) (ports.AnalystResult, error) {
-	if s == nil || batch.TenantID == "" || batch.RunID == "" || batch.PromptVersion == "" || batch.SchemaVersion == "" || len(batch.Events) == 0 {
+	if s == nil || batch.TenantID == "" || batch.RunID == "" || batch.PromptVersion == "" || batch.SchemaVersion == "" || (len(batch.Events) == 0 && len(batch.Candidates) == 0) {
 		return ports.AnalystResult{}, ErrInvalidBatch
 	}
 	batch, err := PrepareBatch(batch, s.privacy)

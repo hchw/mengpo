@@ -103,6 +103,36 @@ func TestObserveDelegatesTenantBoundIdentityAndPayload(t *testing.T) {
 	}
 }
 
+// TestObserveAdmitsVerifiedUserSession proves the console path builds a
+// principal the observations gateway accepts (UserBound), so /api/v1/observe
+// works for a signed-in user and not only for Agents or deployments.
+func TestObserveAdmitsVerifiedUserSession(t *testing.T) {
+	ingestor := &fakeIngestor{event: obsdomain.Event{ID: "event-1", TenantID: "tenant-a", SessionID: "session-a"}, created: true}
+	service := NewService(ServiceOptions{Gateway: ingestor})
+	identity := Identity{
+		TenantID:     "tenant-a",
+		UserID:       "user-a",
+		SourceID:     "user-a",
+		Capabilities: []string{"observe", "project", "feedback"},
+		Source:       SourceVerifiedUser,
+	}
+	ctx := WithIdentity(context.Background(), identity)
+	envelope := envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "user", ID: "user-a"}, `{"text":"hello","message_type":"user_remember"}`)
+	if _, err := service.Observe(ctx, envelope); err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	principal := ingestor.principal
+	if !principal.UserBound {
+		t.Fatalf("principal is not user-bound: %#v", principal)
+	}
+	if principal.AgentBound {
+		t.Fatalf("verified user must not be marked agent-bound: %#v", principal)
+	}
+	if principal.AccessLevel != obsdomain.Level1 {
+		t.Fatalf("access level = %v, want level1", principal.AccessLevel)
+	}
+}
+
 func TestObserveRejectsCrossTenantBeforeIngest(t *testing.T) {
 	ingestor := &fakeIngestor{}
 	service := NewService(ServiceOptions{Gateway: ingestor})

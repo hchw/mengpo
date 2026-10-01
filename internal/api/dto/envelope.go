@@ -3,7 +3,6 @@ package dto
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -20,10 +19,26 @@ const (
 	MaxRelationDepth    = 16
 )
 
-var (
-	ErrInvalidEnvelope    = errors.New("invalid API envelope")
-	ErrUnsupportedVersion = errors.New("unsupported API version")
-)
+// ErrInvalidEnvelope rejects a request whose envelope or payload is malformed.
+// It carries an API error code so the HTTP layer answers 400 instead of 500.
+var ErrInvalidEnvelope = InvalidEnvelopeError{}
+
+// ErrUnsupportedVersion rejects an envelope with an unknown version.
+var ErrUnsupportedVersion = UnsupportedVersionError{}
+
+// InvalidEnvelopeError is the typed form of ErrInvalidEnvelope.
+type InvalidEnvelopeError struct{}
+
+func (InvalidEnvelopeError) Error() string        { return "invalid API envelope" }
+func (InvalidEnvelopeError) APIErrorCode() string { return "INVALID_ENVELOPE" }
+func (InvalidEnvelopeError) Retryable() bool      { return false }
+
+// UnsupportedVersionError is the typed form of ErrUnsupportedVersion.
+type UnsupportedVersionError struct{}
+
+func (UnsupportedVersionError) Error() string        { return "unsupported API version" }
+func (UnsupportedVersionError) APIErrorCode() string { return "UNSUPPORTED_VERSION" }
+func (UnsupportedVersionError) Retryable() bool      { return false }
 
 // Envelope is the common v1 request wrapper. Scope values are client claims,
 // never authorization evidence; handlers must resolve them against an

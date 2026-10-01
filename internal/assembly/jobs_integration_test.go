@@ -118,7 +118,7 @@ func TestJobDispatcherRejectsUnknownType(t *testing.T) {
 	if !errors.Is(err, ErrUnsupportedJobType) {
 		t.Fatalf("Handle(unknown) error = %v, want ErrUnsupportedJobType", err)
 	}
-	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{JobType: JobConsolidate}); err != nil {
-		t.Fatalf("consolidate should be acknowledged: %v", err)
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{JobType: JobConsolidate}); err == nil {
+		t.Fatal("unconfigured consolidate must fail so the durable path retries instead of silently dropping work")
 	}
 }

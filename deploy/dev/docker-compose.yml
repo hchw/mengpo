@@ -58,6 +58,8 @@ services:
       MEMORY_HTTP_ADDR: ":8080"
       MEMORY_EMBEDDING_ARTIFACT: /app/models/all-MiniLM-L6-v2-Q8_0.gguf
       MEMORY_QUEUE_ADAPTER: nats-core
+      MEMORY_CONFIG_MASTER_KEY: ${MEMORY_CONFIG_MASTER_KEY:-mengpo-dev-master-key--32bytes--}
+      MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS: "true"
     ports:
       - "8080:8080"
     depends_on:
@@ -80,6 +82,10 @@ services:
       MEMORY_REDIS_URL: redis://redis:6379/0
       MEMORY_EMBEDDING_ARTIFACT: /app/models/all-MiniLM-L6-v2-Q8_0.gguf
       MEMORY_QUEUE_ADAPTER: nats-core
+      MEMORY_SCHEDULER_ADAPTER: internal
+      MEMORY_SCHEDULE_DEFAULT_INTERVAL: 24h
+      MEMORY_CONFIG_MASTER_KEY: ${MEMORY_CONFIG_MASTER_KEY:-mengpo-dev-master-key--32bytes--}
+      MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS: "true"
     depends_on:
       postgres:
         condition: service_healthy

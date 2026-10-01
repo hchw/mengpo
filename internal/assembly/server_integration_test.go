@@ -169,7 +169,7 @@ func TestHTTPCommandEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewHandler(config.Config{Security: config.SecurityConfig{MaxRequestBytes: 1 << 20}}, useCases, staticAuthenticator{tenantID: tenant.ID}, nil, nil, func(context.Context) error { return nil }, nil, nil)
+	handler := NewHandler(config.Config{Security: config.SecurityConfig{MaxRequestBytes: 1 << 20}}, useCases, staticAuthenticator{tenantID: tenant.ID}, nil, nil, nil, func(context.Context) error { return nil }, nil, nil)
 
 	// Session binding.
 	sessionResponse := postJSON(t, handler, "/api/v1/sessions", envelopeBody(t, tenant.ID, "req-session", "idem-session", "session", testSessionID, map[string]any{"external_id": "conv-1", "title": "demo"}))

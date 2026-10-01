@@ -204,6 +204,9 @@ func TestConsoleEndpoints(t *testing.T) {
 	}
 
 	// Degraded/empty projections.
+	// Session listing lives at /api/v1/sessions/list; POST /api/v1/sessions is
+	// the agent command endpoint and must not be shadowed.
+	consolePost(t, handler, "/api/v1/sessions/list", token, consoleEnvelope(tenant.ID, userID, "list-sessions", map[string]any{"page": 1, "page_size": 20}))
 	consolePost(t, handler, "/api/v1/failures", token, consoleEnvelope(tenant.ID, userID, "failures", map[string]any{}))
 	consolePost(t, handler, "/api/v1/evaluation", token, consoleEnvelope(tenant.ID, userID, "evaluation", map[string]any{}))
 

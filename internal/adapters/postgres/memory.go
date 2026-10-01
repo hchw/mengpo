@@ -435,3 +435,46 @@ func (r *MemoryRepository) ListMemories(ctx context.Context, tenantID string, re
 	}
 	return result, nil
 }
+
+// ListDueMemories returns active or stable memories whose TTL has elapsed.
+func (r *MemoryRepository) ListDueMemories(ctx context.Context, tenantID string, limit int) ([]ports.MemoryNodeRecord, error) {
+	if tenantID == "" || limit <= 0 {
+		return nil, ErrInvalidMemory
+	}
+	var result []ports.MemoryNodeRecord
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT `+memoryNodeColumns+`
+FROM memory_nodes
+WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= now()
+  AND status IN ('active', 'stable')
+ORDER BY expires_at
+LIMIT $1`, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			node, err := scanMemory(rows)
+			if err != nil {
+				return err
+			}
+			result = append(result, node)
+		}
+		return rows.Err()
+	})
+	return result, err
+}
+
+// ListRecentCandidates returns the most recently updated candidates.
+func (r *MemoryRepository) ListRecentCandidates(ctx context.Context, tenantID string, limit int) ([]ports.MemoryNodeRecord, error) {
+	page, err := r.ListMemories(ctx, tenantID, ports.MemoryListRequest{Statuses: []string{"candidate"}, Page: 1, PageSize: limit})
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+var (
+	_ ports.DueMemoryReader       = (*MemoryRepository)(nil)
+	_ ports.RecentCandidateReader = (*MemoryRepository)(nil)
+)

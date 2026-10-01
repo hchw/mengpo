@@ -173,3 +173,27 @@ func (r *OutboxRepository) updateOwnedJob(ctx context.Context, tenantID, jobID, 
 		return nil
 	})
 }
+
+// PurgeDeadLetterJobs deletes dead-letter jobs created before olderThan and
+// reports how many were removed. Cancel/complete states are left untouched.
+func (r *OutboxRepository) PurgeDeadLetterJobs(ctx context.Context, tenantID string, olderThan time.Time) (int, error) {
+	if tenantID == "" {
+		return 0, nil
+	}
+	removed := 0
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `DELETE FROM outbox_jobs WHERE status = 'dead_letter' AND created_at < $1`, olderThan.UTC())
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		removed = int(rows)
+		return nil
+	})
+	return removed, err
+}
+
+var _ ports.OutboxMaintenanceRepository = (*OutboxRepository)(nil)

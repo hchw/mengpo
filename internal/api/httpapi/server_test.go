@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/hchw/mengpo/internal/api/dto"
+	"github.com/hchw/mengpo/internal/application/observation"
 )
 
 type recordingUseCases struct {
@@ -146,6 +148,9 @@ func TestHTTPMapsTypedRetryableErrorsAndDeadlines(t *testing.T) {
 		{"timeout", context.DeadlineExceeded, http.StatusGatewayTimeout, "TIMEOUT", true},
 		{"cancel", context.Canceled, 499, "CANCELLED", true},
 		{"internal", errors.New("secret sql detail"), http.StatusInternalServerError, "INTERNAL", false},
+		{"invalid envelope", dto.ErrInvalidEnvelope, http.StatusBadRequest, "INVALID_ENVELOPE", false},
+		{"wrapped invalid envelope", fmt.Errorf("%w: unsupported feedback type %%q", dto.ErrInvalidEnvelope), http.StatusBadRequest, "INVALID_ENVELOPE", false},
+		{"invalid principal", observation.ErrInvalidPrincipal, http.StatusBadRequest, "INVALID_PRINCIPAL", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

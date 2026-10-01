@@ -368,7 +368,7 @@ func purgeDeletedMemoryDerivedData(ctx context.Context, tx *sql.Tx, memory ports
 		{"delete memory relations", `DELETE FROM memory_relations WHERE source_memory_id = $1 OR target_memory_id = $1`},
 		{"delete memory feedback", `DELETE FROM memory_feedback WHERE memory_id = $1`},
 		{"delete embedding jobs", `DELETE FROM embedding_jobs WHERE memory_id = $1`},
-		{"clear analysis job results", `UPDATE analysis_jobs SET status = 'cancelled', result = NULL, last_error = 'memory_deleted', updated_at = now() WHERE outbox_job_id IN (SELECT id FROM outbox_jobs WHERE aggregate_id = $1 OR position($1::text in payload::text) > 0)`},
+		{"clear analysis job results", `UPDATE analysis_jobs SET status = 'cancelled', result = NULL, last_error = 'memory_deleted', updated_at = now() WHERE outbox_job_id IN (SELECT id FROM outbox_jobs WHERE aggregate_id = $1 OR position($1::text in payload::text) > 0) OR produced_memory_ids ? $1::text`},
 		{"cancel memory outbox jobs", `UPDATE outbox_jobs SET status = 'cancelled', payload = '{}'::jsonb, lease_owner = NULL, lease_until = NULL, last_error = 'memory_deleted', updated_at = now() WHERE (aggregate_id = $1 OR position($1::text in payload::text) > 0) AND status IN ('queued', 'leased', 'running', 'retrying')`},
 	}
 	for _, statement := range statements {

@@ -70,24 +70,59 @@ func (r *OutboxRunner) Run(ctx context.Context) error {
 
 func (r *OutboxRunner) poll(ctx context.Context, batch int, lease, retryDelay time.Duration, now func() time.Time) error {
 	for _, tenantID := range r.Tenants {
-		jobs, err := r.Repository.LeaseJobs(ctx, tenantID, r.WorkerID, batch, lease)
-		if err != nil {
-			return fmt.Errorf("lease jobs for tenant %s: %w", tenantID, err)
-		}
-		for _, job := range jobs {
-			if err := r.Repository.StartJob(ctx, tenantID, job.ID, r.WorkerID); err != nil {
-				return fmt.Errorf("start job %s: %w", job.ID, err)
-			}
-			if err := r.Handle(ctx, job); err != nil {
-				if retryErr := r.Repository.RetryJob(ctx, tenantID, job.ID, r.WorkerID, err.Error(), now().Add(retryDelay)); retryErr != nil {
-					return fmt.Errorf("retry job %s: %w", job.ID, retryErr)
-				}
-				continue
-			}
-			if err := r.Repository.CompleteJob(ctx, tenantID, job.ID, r.WorkerID); err != nil {
-				return fmt.Errorf("complete job %s: %w", job.ID, err)
-			}
+		if err := r.pollTenant(ctx, tenantID, batch, lease, retryDelay, now); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (r *OutboxRunner) pollTenant(ctx context.Context, tenantID string, batch int, lease, retryDelay time.Duration, now func() time.Time) error {
+	jobs, err := r.Repository.LeaseJobs(ctx, tenantID, r.WorkerID, batch, lease)
+	if err != nil {
+		return fmt.Errorf("lease jobs for tenant %s: %w", tenantID, err)
+	}
+	for _, job := range jobs {
+		if err := r.Repository.StartJob(ctx, tenantID, job.ID, r.WorkerID); err != nil {
+			return fmt.Errorf("start job %s: %w", job.ID, err)
+		}
+		if err := r.Handle(ctx, job); err != nil {
+			if retryErr := r.Repository.RetryJob(ctx, tenantID, job.ID, r.WorkerID, err.Error(), now().Add(retryDelay)); retryErr != nil {
+				return fmt.Errorf("retry job %s: %w", job.ID, retryErr)
+			}
+			continue
+		}
+		if err := r.Repository.CompleteJob(ctx, tenantID, job.ID, r.WorkerID); err != nil {
+			return fmt.Errorf("complete job %s: %w", job.ID, err)
+		}
+	}
+	return nil
+}
+
+// PollTenant performs a single lease/handle pass for one tenant. It lets the
+// scheduler drive the durable queue one pass at a time without a blocking loop.
+func (r *OutboxRunner) PollTenant(ctx context.Context, tenantID string) error {
+	if r == nil || r.Repository == nil || r.WorkerID == "" || r.Handle == nil {
+		return fmt.Errorf("outbox runner is not configured")
+	}
+	batch, lease, retryDelay, now := r.defaults()
+	return r.pollTenant(ctx, tenantID, batch, lease, retryDelay, now)
+}
+
+func (r *OutboxRunner) defaults() (int, time.Duration, time.Duration, func() time.Time) {
+	batch, lease, retryDelay := r.BatchSize, r.Lease, r.RetryDelay
+	if batch <= 0 {
+		batch = 16
+	}
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	if retryDelay <= 0 {
+		retryDelay = time.Second
+	}
+	now := r.Now
+	if now == nil {
+		now = time.Now
+	}
+	return batch, lease, retryDelay, now
 }

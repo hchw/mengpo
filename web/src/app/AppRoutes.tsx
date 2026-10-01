@@ -11,6 +11,7 @@ import { MemoryEvaluationPage } from '../pages/MemoryEvaluationPage';
 import { ProjectionDebuggerPage } from '../pages/ProjectionDebuggerPage';
 import { SessionExplorerPage } from '../pages/SessionExplorerPage';
 import { SettingsPage } from '../pages/SettingsPage';
+import { AnalysisRunsPage } from '../pages/AnalysisRunsPage';
 import { StateView } from '../components/states';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { NavIcon } from '../components/icons';
@@ -24,6 +25,7 @@ const NAV = [
   { to: '/debugger', label: 'Projection Debugger', icon: 'debugger' },
   { to: '/failures', label: 'Failure Analysis', icon: 'failures' },
   { to: '/evaluation', label: 'Evaluation', icon: 'evaluation' },
+  { to: '/curation', label: 'Curation', icon: 'evaluation' },
   { to: '/members', label: 'Members', icon: 'members' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
 ];
@@ -123,7 +125,8 @@ export function AppRoutes({ api, authenticatedOverride }: AppRoutesProps) {
               <Route path="/failures" element={<FailureAnalysisPage api={consoleApi} />} />
               <Route path="/evaluation" element={<MemoryEvaluationPage api={consoleApi} />} />
               <Route path="/members" element={<MembersPage api={consoleApi} role={activeTenant?.role ?? 'member'} />} />
-              <Route path="/settings" element={<SettingsPage tenant={activeTenant} />} />
+              <Route path="/curation" element={<AnalysisRunsPage api={consoleApi} />} />
+          <Route path="/settings" element={<SettingsPage tenant={activeTenant} api={consoleApi} role={activeTenant?.role} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </ErrorBoundary>

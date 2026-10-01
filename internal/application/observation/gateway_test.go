@@ -104,6 +104,43 @@ func TestGatewayEnforcesProgressiveAccessLevels(t *testing.T) {
 	}
 }
 
+// TestGatewayAdmitsVerifiedUserSession proves a Level 1 principal bound to a
+// verified end-user session is admissible (the console /api/v1/observe path),
+// while an equivalent principal with no binding is still rejected.
+func TestGatewayAdmitsVerifiedUserSession(t *testing.T) {
+	gateway := NewGateway(&memoryRepository{})
+	input := Input{
+		IdempotencyKey: "key",
+		MessageType:    "message",
+		Payload:        json.RawMessage(`{}`),
+		OccurredAt:     time.Now(),
+		Visibility:     observation.VisibilitySession,
+		Reliability:    observation.ReliabilityUnknown,
+		RetentionClass: "standard",
+		SessionID:      "session",
+	}
+	user := Principal{
+		TenantID:    "t",
+		SourceID:    "user",
+		SourceType:  observation.SourceUser,
+		AccessLevel: observation.Level1,
+		UserBound:   true,
+	}
+	if _, _, err := gateway.IngestMessage(context.Background(), user, input); err != nil {
+		t.Fatalf("user-bound Level 1: %v", err)
+	}
+	unbound := user
+	unbound.UserBound = false
+	if _, _, err := gateway.IngestMessage(context.Background(), unbound, input); err != ErrInvalidPrincipal {
+		t.Fatalf("unbound Level 1 error = %v, want %v", err, ErrInvalidPrincipal)
+	}
+	// The sentinel carries an API code so the HTTP layer answers 400.
+	coded, ok := any(ErrInvalidPrincipal).(interface{ APIErrorCode() string })
+	if !ok || coded.APIErrorCode() != "INVALID_PRINCIPAL" {
+		t.Fatalf("ErrInvalidPrincipal is not a coded error: %T", ErrInvalidPrincipal)
+	}
+}
+
 func TestGatewayRequiresTrustedTenantAndSource(t *testing.T) {
 	gateway := NewGateway(&memoryRepository{})
 	_, _, err := gateway.IngestMessage(context.Background(), Principal{SourceID: "source"}, Input{})

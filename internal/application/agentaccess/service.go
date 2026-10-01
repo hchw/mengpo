@@ -293,6 +293,13 @@ func PrincipalFor(identity Identity, scoped Scoped) observation.Principal {
 		if principal.AccessLevel == "" {
 			principal.AccessLevel = obsdomain.Level1
 		}
+	case SourceVerifiedUser:
+		// A verified console session is a trusted binding for its own user:
+		// its observations are admissible without an Agent context.
+		principal.UserBound = true
+		if principal.AccessLevel == "" {
+			principal.AccessLevel = obsdomain.Level1
+		}
 	default:
 		if principal.AccessLevel == "" {
 			principal.AccessLevel = obsdomain.Level1

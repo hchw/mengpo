@@ -39,6 +39,14 @@ type Metrics struct {
 	requests     atomic.Uint64
 	serverErrors atomic.Uint64
 	byTenant     sync.Map // tenantID string -> *tenantCounters
+	opsOnce      sync.Once
+	ops          *OpsMetrics
+}
+
+// Ops returns the operational (non-HTTP) metrics registry, creating it lazily.
+func (m *Metrics) Ops() *OpsMetrics {
+	m.opsOnce.Do(func() { m.ops = NewOpsMetrics() })
+	return m.ops
 }
 
 func (m *Metrics) Handler() http.Handler {
@@ -49,6 +57,9 @@ func (m *Metrics) Handler() http.Handler {
 			m.requests.Load(), m.serverErrors.Load())
 		for _, snapshot := range m.TenantSnapshots() {
 			_, _ = fmt.Fprintf(w, "# HELP memory_http_tenant_requests_total Per-tenant HTTP requests handled.\n# TYPE memory_http_tenant_requests_total counter\nmemory_http_tenant_requests_total{tenant=%q} %d\n# HELP memory_http_tenant_server_errors_total Per-tenant HTTP 5xx responses.\n# TYPE memory_http_tenant_server_errors_total counter\nmemory_http_tenant_server_errors_total{tenant=%q} %d\n", snapshot.Tenant, snapshot.Requests, snapshot.Tenant, snapshot.ServerErrors)
+		}
+		if m.ops != nil {
+			m.ops.Render(w)
 		}
 	})
 }

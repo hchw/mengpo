@@ -24,9 +24,11 @@ type ConsoleAPI struct {
 	Memories   ports.MemoryNodeRepository
 	List       ports.MemoryListRepository
 	Merge      ports.MemoryMergeRepository
+	Sessions   ports.SessionListRepository
 	Governance *governance.Service
 	Members    MemberLister
 	Agents     AgentLister
+	Runs       ports.AnalysisRunStore
 }
 
 // MemberLister lists tenant members.
@@ -45,6 +47,7 @@ func (c *ConsoleAPI) Register(mux *http.ServeMux) {
 	if c == nil || c.Memories == nil || c.List == nil {
 		return
 	}
+	mux.HandleFunc("POST /api/v1/sessions/list", c.handleSessions)
 	mux.HandleFunc("POST /api/v1/memories", c.handleMemories)
 	mux.HandleFunc("POST /api/v1/memories/{id}", c.handleMemory)
 	mux.HandleFunc("POST /api/v1/candidates", c.handleCandidates)
@@ -80,6 +83,56 @@ type pageResponse struct {
 	Total    int64        `json:"total"`
 	Page     int          `json:"page"`
 	PageSize int          `json:"page_size"`
+}
+
+// handleSessions lists tenant sessions for the console. It lives at
+// /api/v1/sessions/list because POST /api/v1/sessions is the agent session
+// command endpoint.
+func (c *ConsoleAPI) handleSessions(w http.ResponseWriter, r *http.Request) {
+	envelope, scoped, err := c.bind(r)
+	if err != nil {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if c.Sessions == nil {
+		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "session listing is not configured")
+		return
+	}
+	var payload pagePayload
+	if len(envelope.Payload) > 0 {
+		_ = json.Unmarshal(envelope.Payload, &payload)
+	}
+	result, err := c.Sessions.ListSessions(r.Context(), scoped.TenantID, ports.SessionListRequest{
+		UserID: scoped.UserID, Page: payload.Page, PageSize: payload.PageSize,
+	})
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to list sessions")
+		return
+	}
+	items := make([]sessionItem, 0, len(result.Items))
+	for _, session := range result.Items {
+		items = append(items, sessionItem{
+			ID: session.ID, Title: session.Title, Status: session.Status,
+			StartedAt: session.StartedAt.UTC().Format(time.RFC3339),
+			UpdatedAt: session.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeAPIData(w, http.StatusOK, sessionPageResponse{Items: items, Total: result.Total, Page: result.Page, PageSize: result.PageSize})
+}
+
+type sessionItem struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	StartedAt string `json:"started_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type sessionPageResponse struct {
+	Items    []sessionItem `json:"items"`
+	Total    int64         `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
 }
 
 func (c *ConsoleAPI) handleMemories(w http.ResponseWriter, r *http.Request) {
@@ -378,6 +431,40 @@ func (c *ConsoleAPI) bind(r *http.Request) (dto.Envelope, agentaccess.Scoped, er
 		return dto.Envelope{}, agentaccess.Scoped{}, err
 	}
 	return envelope, scoped, nil
+}
+
+func (c *ConsoleAPI) evaluationSnapshot(ctx context.Context) map[string]any {
+	snapshot := map[string]any{
+		"generated_at":          time.Now().UTC().Format(time.RFC3339),
+		"retrieval_precision":   0,
+		"promotion_precision":   0,
+		"wrong_memory_rate":     0,
+		"attribution_accuracy":  0,
+		"latency_ms_p95":        0,
+		"tokens_per_projection": 0,
+		"cost_usd":              0,
+		"cache_hit_rate":        0,
+	}
+	if c == nil || c.Runs == nil {
+		return snapshot
+	}
+	identity, ok := agentaccess.IdentityFromContext(ctx)
+	if !ok || identity.TenantID == "" {
+		return snapshot
+	}
+	runs, err := c.Runs.ListAnalysisRuns(ctx, identity.TenantID, ports.AnalysisRunFilter{TaskType: "evaluate_feedback", Page: 1, PageSize: 1})
+	if err != nil || len(runs) == 0 {
+		return snapshot
+	}
+	var metrics map[string]any
+	if json.Unmarshal(runs[0].Result, &metrics) != nil {
+		return snapshot
+	}
+	for key, value := range metrics {
+		snapshot[key] = value
+	}
+	snapshot["generated_at"] = runs[0].CreatedAt.UTC().Format(time.RFC3339)
+	return snapshot
 }
 
 func itemFor(node ports.MemoryNodeRecord) map[string]any {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 var ErrInvalidNormalizedEvent = errors.New("invalid normalized event record")
@@ -34,4 +35,22 @@ type MemberRecord struct {
 	Email  string
 	Role   string
 	Status string
+}
+
+// PendingAnalysisEvent is a normalized observation selected for periodic
+// consolidation. RawEventID is the evidence id used in analysis batches.
+type PendingAnalysisEvent struct {
+	NormalizedID string
+	RawEventID   string
+	SessionID    string
+	OccurredAt   time.Time
+	Payload      json.RawMessage
+	Sequence     *int64
+}
+
+// NormalizedEventReader selects normalized events for periodic maintenance. It
+// reads; it never writes memory.
+type NormalizedEventReader interface {
+	ListPendingAnalysisEvents(ctx context.Context, tenantID string, offset, limit int) ([]PendingAnalysisEvent, error)
+	LoadAnalysisEventsByRawIDs(ctx context.Context, tenantID string, rawEventIDs []string) ([]PendingAnalysisEvent, error)
 }

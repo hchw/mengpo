@@ -99,12 +99,12 @@ export class ApiClient {
     };
   }
 
-  async request<T>(path: string, input: RequestEnvelopeInput, payload?: unknown): Promise<T> {
+  async request<T>(path: string, input: RequestEnvelopeInput, payload?: unknown, method: 'POST' | 'PUT' = 'POST'): Promise<T> {
     const envelope = this.buildEnvelope(input, payload ?? {});
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method: 'POST',
+        method,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(envelope),
       });
