@@ -32,6 +32,10 @@ type Signals struct {
 	CandidateBudget      int
 	RankingBudget        int
 	InjectionTokenBudget int
+	// AllowCandidates is a caller preference for weak-candidate recall. A nil
+	// value leaves the decision to policy; an explicit false denies candidates
+	// even when policy would otherwise allow them.
+	AllowCandidates *bool
 }
 
 type Policy struct {
@@ -170,6 +174,9 @@ func (o *Orchestrator) Choose(signals Signals) (Decision, error) {
 	}
 
 	includeCandidates := decision.Mode == ModeDivergence && o.policy.AllowWeakCandidateRecall
+	if signals.AllowCandidates != nil && !*signals.AllowCandidates {
+		includeCandidates = false
+	}
 	statuses := []string{"active", "stable"}
 	if includeCandidates {
 		statuses = append(statuses, "candidate")

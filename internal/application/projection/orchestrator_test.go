@@ -81,6 +81,42 @@ func TestCandidateRecallOnlyEnabledForDivergenceByPolicy(t *testing.T) {
 	}
 }
 
+// TestAllowCandidatesHintCanOnlyNarrow proves the caller's candidate preference
+// is a deny-only hint: it can withhold weak candidates from a divergence that
+// policy would have allowed, but it cannot force candidates in when policy
+// denies them.
+func TestAllowCandidatesHintCanOnlyNarrow(t *testing.T) {
+	deny := false
+	allow := true
+
+	enabled := NewOrchestrator(basePolicy())
+	allowed, err := enabled.Choose(Signals{Clarity: ClarityClear, ProgressPercent: 90, RepeatedFailures: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed.Scope.IncludeCandidates {
+		t.Fatal("precondition: policy allows weak candidates on divergence")
+	}
+
+	denied, err := enabled.Choose(Signals{Clarity: ClarityClear, ProgressPercent: 90, RepeatedFailures: 2, AllowCandidates: &deny})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied.Scope.IncludeCandidates || contains(denied.Scope.Statuses, "candidate") {
+		t.Fatalf("deny hint did not withhold candidates: %#v", denied.Scope)
+	}
+
+	policy := basePolicy()
+	policy.AllowWeakCandidateRecall = false
+	disallowed, err := NewOrchestrator(policy).Choose(Signals{Clarity: ClarityClear, ProgressPercent: 90, RepeatedFailures: 2, AllowCandidates: &allow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disallowed.Scope.IncludeCandidates {
+		t.Fatalf("allow hint overrode policy: %#v", disallowed.Scope)
+	}
+}
+
 func TestDivergenceHintRequiresPolicyButCannotOverrideSafety(t *testing.T) {
 	policy := basePolicy()
 	policy.AllowDivergenceHint = false

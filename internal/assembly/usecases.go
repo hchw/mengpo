@@ -42,6 +42,51 @@ type projectPayload struct {
 	MemoryType  string `json:"memory_type"`
 	QueryHash   string `json:"query_hash"`
 	NewEvidence bool   `json:"new_evidence"`
+	// Scenario describes what the caller can observe about the task. Every
+	// field is optional: an absent scenario keeps the historical behaviour
+	// (clear task, no failure signals) so existing callers are unaffected.
+	Scenario *scenarioSignals `json:"scenario"`
+}
+
+// scenarioSignals carry observable facts about the task. They are the caller's
+// report, not authorization evidence: they only influence recall mode and depth,
+// and never widen the caller's visible scope.
+type scenarioSignals struct {
+	Clarity          string `json:"clarity"`
+	ProgressPercent  *int   `json:"progress_percent"`
+	RepeatedFailures *int   `json:"repeated_failures"`
+	ConflictCount    *int   `json:"conflict_count"`
+	EvidenceGapCount *int   `json:"evidence_gap_count"`
+}
+
+func (s *scenarioSignals) apply(signals *projection.Signals) error {
+	if s.Clarity != "" {
+		signals.Clarity = projection.TaskClarity(s.Clarity)
+	}
+	if s.ProgressPercent != nil {
+		signals.ProgressPercent = *s.ProgressPercent
+	}
+	if s.RepeatedFailures != nil {
+		signals.RepeatedFailures = *s.RepeatedFailures
+	}
+	if s.ConflictCount != nil {
+		signals.ConflictCount = *s.ConflictCount
+	}
+	if s.EvidenceGapCount != nil {
+		signals.EvidenceGapCount = *s.EvidenceGapCount
+	}
+	switch signals.Clarity {
+	case projection.ClarityClear, projection.ClarityPartial, projection.ClarityUnclear:
+	default:
+		return fmt.Errorf("%w: unsupported task clarity %q", dto.ErrInvalidEnvelope, s.Clarity)
+	}
+	if signals.ProgressPercent < 0 || signals.ProgressPercent > 100 {
+		return fmt.Errorf("%w: progress_percent must be between 0 and 100", dto.ErrInvalidEnvelope)
+	}
+	if signals.RepeatedFailures < 0 || signals.ConflictCount < 0 || signals.EvidenceGapCount < 0 {
+		return fmt.Errorf("%w: scenario counts must not be negative", dto.ErrInvalidEnvelope)
+	}
+	return nil
 }
 
 func (p *Projector) Project(ctx context.Context, scoped agentaccess.Scoped, envelope dto.Envelope) (any, error) {
@@ -61,10 +106,16 @@ func (p *Projector) Project(ctx context.Context, scoped agentaccess.Scoped, enve
 		RankingBudget:        firstPositive(envelope.Budget.Ranking, defaultRankingBudget),
 		InjectionTokenBudget: firstPositive(envelope.Budget.InjectionTokens, defaultInjectionTokenBudget),
 	}
+	if payload.Scenario != nil {
+		if err := payload.Scenario.apply(&signals); err != nil {
+			return nil, err
+		}
+	}
 	if envelope.MemoryHint != nil {
 		signals.Hint = envelope.MemoryHint.Mode
 		signals.HintTopics = envelope.MemoryHint.Topics
 		signals.HintMemoryIDs = envelope.MemoryHint.MemoryIDs
+		signals.AllowCandidates = envelope.MemoryHint.AllowCandidates
 	}
 	decision, err := p.Orchestrator.Choose(signals)
 	if err != nil {

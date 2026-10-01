@@ -65,6 +65,9 @@ func TestPipelineBuildsProjectionAndRecordsEvent(t *testing.T) {
 	if repo.event.RequestID != "hash" || repo.event.Mode != "focus" {
 		t.Fatalf("event not recorded: %#v", repo.event)
 	}
+	if projection.ProjectionID == "" || projection.ProjectionID != repo.event.ID {
+		t.Fatalf("projection identifier = %q, want the recorded event %q", projection.ProjectionID, repo.event.ID)
+	}
 }
 
 func TestPipelineDegradesToSessionContextOnTimeout(t *testing.T) {
@@ -79,6 +82,11 @@ func TestPipelineDegradesToSessionContextOnTimeout(t *testing.T) {
 	}
 	if len(projection.Items) != 1 || projection.Items[0].Text != "current session note" {
 		t.Fatalf("session fallback not injected: %#v", projection.Items)
+	}
+	// A degraded projection returns local session context, not memories, so it
+	// carries no projection identity to reference.
+	if projection.ProjectionID != "" {
+		t.Fatalf("degraded projection must not carry an identifier, got %q", projection.ProjectionID)
 	}
 }
 
@@ -135,6 +143,9 @@ func TestPipelineServesCacheHitUntilNewEvidence(t *testing.T) {
 	second, err := pipeline.Run(context.Background(), pipelineRequest())
 	if err != nil || !second.Metadata.CacheHit || len(second.Items) != 1 {
 		t.Fatalf("cache hit not served: %#v err=%v", second.Metadata, err)
+	}
+	if first.ProjectionID == "" || second.ProjectionID != first.ProjectionID {
+		t.Fatalf("cache hit identifier = %q, want the originating projection %q", second.ProjectionID, first.ProjectionID)
 	}
 	request := pipelineRequest()
 	request.NewEvidence = true

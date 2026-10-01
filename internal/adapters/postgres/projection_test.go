@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"testing"
@@ -104,5 +105,87 @@ func TestProjectionPersistenceAndTenantScopedCache(t *testing.T) {
 	}
 	if err := repository.RecordProjection(ctx, tenantA.ID, ports.ProjectionEvent{RequestID: "bad", UserID: userID, Mode: "focus"}); err == nil {
 		t.Fatal("projection event with missing explanations accepted")
+	}
+}
+
+// TestFindProjectionResolvesOwnedReference proves a projection reference can be
+// resolved to its owner and exposed memories, and that unknown, malformed, or
+// cross-tenant references are reported as not-found instead of as a server
+// failure or another tenant's data.
+func TestFindProjectionResolvesOwnedReference(t *testing.T) {
+	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set MEMORY_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.ApplyPlatformMigrations(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	store := registry.NewStore(db)
+	tenant := createMigratedTenant(t, ctx, db, store, "projection lookup")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, tenant.ID)
+	})
+	router := tenantdb.NewRouter(db, store)
+	repository := NewProjectionRepository(router)
+
+	userID := "00000000-0000-4000-8000-000000000051"
+	sessionID := "00000000-0000-4000-8000-000000000052"
+	memoryID := "00000000-0000-4000-8000-000000000053"
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,user_id,status) VALUES($1,$2,'active')`, sessionID, userID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projectionID := "00000000-0000-4000-8000-000000000751"
+	if err := repository.RecordProjection(ctx, tenant.ID, ports.ProjectionEvent{
+		ID: projectionID, RequestID: "req-lookup", UserID: userID, SessionID: sessionID, Mode: "focus",
+		SelectedIDs:      []string{memoryID},
+		SelectionReasons: json.RawMessage(`{"memory":{"score":0.9}}`),
+		ExcludedReasons:  json.RawMessage(`{"none":{"reason":"budget"}}`),
+		Budget:           json.RawMessage(`{"candidate":5}`),
+		Provenance:       json.RawMessage(`{"memory":["full-text"]}`),
+	}); err != nil {
+		t.Fatalf("RecordProjection: %v", err)
+	}
+
+	lookup, err := repository.FindProjection(ctx, tenant.ID, projectionID)
+	if err != nil {
+		t.Fatalf("FindProjection: %v", err)
+	}
+	if lookup.UserID != userID || lookup.SessionID != sessionID || len(lookup.SelectedMemoryIDs) != 1 || lookup.SelectedMemoryIDs[0] != memoryID {
+		t.Fatalf("lookup = %#v", lookup)
+	}
+
+	for _, tc := range []struct{ name, id string }{
+		{"unknown", "00000000-0000-4000-8000-000000000799"},
+		{"malformed", "not-a-uuid"},
+		{"empty", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := repository.FindProjection(ctx, tenant.ID, tc.id); !errors.Is(err, ports.ErrProjectionNotFound) {
+				t.Fatalf("error = %v, want ErrProjectionNotFound", err)
+			}
+		})
+	}
+
+	other := createMigratedTenant(t, ctx, db, store, "projection lookup other")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+other.Schema+` CASCADE`)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, other.ID)
+	})
+	if _, err := repository.FindProjection(ctx, other.ID, projectionID); !errors.Is(err, ports.ErrProjectionNotFound) {
+		t.Fatalf("cross-tenant error = %v, want ErrProjectionNotFound", err)
 	}
 }

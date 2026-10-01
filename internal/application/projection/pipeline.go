@@ -49,14 +49,16 @@ type ProjectionMetadata struct {
 }
 
 type Projection struct {
-	Items    []Item             `json:"items"`
-	Usage    BudgetUsage        `json:"usage"`
-	Metadata ProjectionMetadata `json:"metadata"`
+	Items        []Item             `json:"items"`
+	Usage        BudgetUsage        `json:"usage"`
+	Metadata     ProjectionMetadata `json:"metadata"`
+	ProjectionID string             `json:"projection_id,omitempty"`
 }
 
 type cachedProjection struct {
-	Items []Item      `json:"items"`
-	Usage BudgetUsage `json:"usage"`
+	Items        []Item      `json:"items"`
+	Usage        BudgetUsage `json:"usage"`
+	ProjectionID string      `json:"projection_id,omitempty"`
 }
 
 // Pipeline is the projection use case: it composes orchestration decision,
@@ -107,7 +109,9 @@ func (p *Pipeline) Run(ctx context.Context, request PipelineRequest) (Projection
 				metadata.DegradedReasons = append(metadata.DegradedReasons, "cache-decode-failed: "+err.Error())
 			} else {
 				metadata.CacheHit = true
-				return Projection{Items: stored.Items, Usage: stored.Usage, Metadata: metadata}, nil
+				// A cache hit returns the identity of the projection that produced this
+				// result, so the caller can still reference what it actually received.
+				return Projection{Items: stored.Items, Usage: stored.Usage, Metadata: metadata, ProjectionID: stored.ProjectionID}, nil
 			}
 		}
 	}
@@ -148,12 +152,15 @@ func (p *Pipeline) Run(ctx context.Context, request PipelineRequest) (Projection
 		if projection.Metadata.Degraded {
 			degradedMode = "degraded"
 		}
-		if err := p.persistence.Record(ctx, request.TenantID, request.QueryHash, request.UserID, request.SessionID, request.Decision, ranked, selected, degradedMode); err != nil {
-			projection.Metadata.DegradedReasons = append(projection.Metadata.DegradedReasons, "projection-record-failed: "+err.Error())
+		projectionID, recordErr := p.persistence.Record(ctx, request.TenantID, request.QueryHash, request.UserID, request.SessionID, request.Decision, ranked, selected, degradedMode)
+		if recordErr != nil {
+			projection.Metadata.DegradedReasons = append(projection.Metadata.DegradedReasons, "projection-record-failed: "+recordErr.Error())
 			projection.Metadata.Degraded = true
+		} else {
+			projection.ProjectionID = projectionID
 		}
 		if cacheKey != "" {
-			if payload, marshalErr := json.Marshal(cachedProjection{Items: selected.Selected, Usage: selected.Usage}); marshalErr == nil {
+			if payload, marshalErr := json.Marshal(cachedProjection{Items: selected.Selected, Usage: selected.Usage, ProjectionID: projectionID}); marshalErr == nil {
 				if err := p.persistence.PutCache(ctx, request.TenantID, cacheKey, request.UserID, request.SessionID, request.ScopeType, payload, p.policy.CacheTTL); err != nil {
 					projection.Metadata.DegradedReasons = append(projection.Metadata.DegradedReasons, "cache-write-failed: "+err.Error())
 					projection.Metadata.Degraded = true

@@ -73,6 +73,7 @@ func BuildUseCases(cfg config.Config, db *sql.DB) (httpapi.UseCases, error) {
 		Feedback:     &FeedbackRecorder{Repository: feedback},
 		Consolidator: &Consolidator{Jobs: outbox, NewID: newUUID},
 		Quarantine:   quarantine,
+		Projections:  projections,
 	}), nil
 }
 
