@@ -52,6 +52,9 @@ API: http://localhost:8080. NATS monitoring: http://localhost:8222.
 | `MEMORY_QUEUE_ADAPTER` | `nats-core` (default) or `none` for PostgreSQL polling only |
 | `MEMORY_EMBEDDING_ARTIFACT` | Path to the local embedding GGUF artifact |
 | `MEMORY_MIGRATE_ON_START` | Run platform migrations on startup (default `true`) |
+| `MEMORY_SCHEDULER_ADAPTER` | Periodic scheduler: `internal` (default) or `none` |
+| `MEMORY_SCHEDULE_DEFAULT_INTERVAL` | Default per-tenant schedule cadence (default `24h`) |
+| `MEMORY_CONFIG_MASTER_KEY` | 32-byte master key (base64/hex/raw) encrypting per-tenant provider secrets |
 
 All keys use the `MEMORY_` prefix; unprefixed legacy names (for example
 `DATABASE_URL`, `HTTP_ADDR`, `MQ_URL`) are accepted during the migration window
@@ -69,6 +72,114 @@ only. See `.env.example` for the full canonical list.
 - Security events (`provider`, `api`, `data_access`, `export`, `delete`,
   `audit`) are emitted as structured logs with mandatory tenant and actor
   identity. Sensitive-looking detail fields are redacted automatically.
+- **Provider secrets** are encrypted at rest with AES-256-GCM under
+  `MEMORY_CONFIG_MASTER_KEY`. The key is injected from the secret store and is
+  never written to the database or image. If the key is missing, saving a
+  provider secret is rejected — the service never falls back to plaintext.
+  Without the key you can still run the environment-default provider.
+
+### Recreating the API container
+
+The console image runs nginx with `proxy_pass http://memory-server:8080`; nginx
+resolves that upstream once at startup. If you recreate or reassign the API
+container, also restart the console so it re-resolves the address, otherwise the
+console returns `502 Bad Gateway` even though the API is healthy:
+
+```sh
+docker compose -f deploy/dev/docker-compose.yml up -d --force-recreate memory-server console
+```
+
+### Verifying memory injection
+
+`cmd/verify-injection` is a runnable end-to-end check of the injection path
+against a live service. It only uses the public HTTP API and exits non-zero on
+the first failed check:
+
+```sh
+go run ./cmd/verify-injection                       # 12 memories, 8 injections
+go run ./cmd/verify-injection -rounds 30            # stress: 30 sequential injections
+go run ./cmd/verify-injection -corpus 12 -verbose
+go run ./cmd/verify-injection -base http://localhost:5173
+go run ./cmd/verify-injection -seed=false           # never touch the database
+```
+
+It seeds a **labelled corpus** of long, realistic memories (one distinctive
+keyword each) and then injects a series of queries whose expected answer is
+known, so effectiveness — not just "something came back" — is measured:
+
+| Check | Expectation |
+| --- | --- |
+| Precision | every injected memory mentions the query term (no unrelated memory) |
+| Recall | the labelled memory for that query is always injected |
+| Determinism | repeating a query injects the same memory set |
+| Duplicates | no repeated entry within one projection |
+| Ranking | injected items are ordered by non-increasing score |
+| Metering | sum of item token costs equals `usage.TokensInjected` |
+| Budget | `usage.TokensInjected` never exceeds `injection_tokens` |
+| Truncation | a small budget truncates long content; a large budget keeps it whole |
+| Feedback | `POST /api/v1/feedback` stores a signal for an injected memory |
+
+Step 6 covers the **whole-session observation** path: it opens a working session
+and a control session, pushes a realistic transcript (a tool failure, a user
+correction, two "remember" instructions) plus events with no memory intent, and
+then checks that the session was ingested and that the rule pre-screen triggered
+analysis runs. Verifying that the analysis *produces a retained memory and
+injects it inside the session* needs a real LLM, so it is opt-in:
+
+```sh
+go run ./cmd/verify-injection -session-memory \
+  -provider-base-url https://api.example.com/v1 -provider-model some-model -provider-api-key sk-...
+```
+
+With `-session-memory` the tool also confirms the resulting session memory and
+checks that it is injected inside that session but **not** visible from another
+session.
+
+The run ends with an aggregate report (precision/recall, violation counts,
+p50/p95 latency, cache hit rate, retrieval modes). Seeding uses
+`MEMORY_DATABASE_URL` and only writes the tenant's fixture rows; it is
+idempotent.
+
+Notes:
+
+- Payload validation errors (`dto.ErrInvalidEnvelope`, `observation.ErrInvalidPrincipal`)
+  carry API error codes, so bad requests answer `400` instead of `500`.
+- `memory_hint.memory_ids` is accepted and echoed but does not force-inject
+  those memories; only the hint mode affects retrieval.
+- Recall uses the full-text channel on `content_text`; memories without an
+  embedding are still injected, but a query only matches terms that literally
+  appear in the text (the `simple` text search configuration does not stem and
+  does not segment CJK).
+
+### Memory LLM curation and per-tenant providers
+
+- The Memory LLM is the only model analysis provider for curation. It is a
+  **candidate analyser**: it only ever produces candidates
+  (`status=candidate`, `default_retrieval=false`) that must pass evidence
+  validation and governance before promotion.
+- **Provider configuration is per tenant.** A tenant administrator configures
+  its own provider in the console (Settings → Memory LLM provider): enable,
+  base URL, model, API key and timeouts. The API key is write-only: it is never
+  returned, only a masked hint is shown.
+- **Precedence**: tenant-stored configuration wins over the environment default
+  (`MEMORY_LLM_BASE_URL`/`MEMORY_LLM_MODEL`/`MEMORY_LLM_API_KEY`), which wins
+  over disabled. A tenant that explicitly disables the provider does not fall
+  back to the environment default.
+- **Changes apply without a restart.** Saved configuration is hot-swapped;
+  worker replicas pick it up via a short-TTL cache, so no rollout is required.
+  A configuration that fails validation is rejected and the running one is kept.
+- **Trigger gating**: ordinary events are normalized but never sent to the
+  model. Only failure/retry/user-correction signals and explicit memory intent
+  trigger analysis; periodic maintenance batches the rest. Identical batches
+  are de-duplicated via the tenant cache and stable idempotency keys.
+- **Every run is recorded.** `analysis_jobs` (surfaced in the console under
+  Curation) captures the trigger, model, prompt version, inputs, outcome,
+  latency, tokens and the count of candidates/discarded/conflicts, plus the
+  degradation reason when the rule fallback was used.
+- **Schedules are per tenant.** Each tenant owns its curation plan
+  (`tenant_schedules`) with a default daily cadence and can adjust it from the
+  console. Multi-replica executions are serialized with a PostgreSQL advisory
+  lock, so a trigger runs at most once.
 
 ## 4. Migrations
 

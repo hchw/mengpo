@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,7 +13,18 @@ import (
 	"github.com/hchw/mengpo/internal/ports"
 )
 
-var ErrInvalidPrincipal = errors.New("trusted observation principal is invalid")
+// ErrInvalidPrincipal rejects an observation whose principal was not built by the
+// binding layer, or whose access level is not bound to a deployment, an Agent
+// context, or a verified user session.
+var ErrInvalidPrincipal = PrincipalError{}
+
+// PrincipalError reports an inadmissible observation principal. It carries an
+// API error code so the HTTP layer answers 400 instead of 500.
+type PrincipalError struct{}
+
+func (PrincipalError) Error() string        { return "trusted observation principal is invalid" }
+func (PrincipalError) APIErrorCode() string { return "INVALID_PRINCIPAL" }
+func (PrincipalError) Retryable() bool      { return false }
 
 // Principal must be constructed by the authentication/deployment binding layer,
 // not from fields in the event payload.
@@ -25,6 +35,9 @@ type Principal struct {
 	AccessLevel     observation.AccessLevel
 	DeploymentBound bool
 	AgentBound      bool
+	// UserBound marks a principal resolved from a verified end-user session.
+	// Level 1/2 observations require either an Agent context or such a session.
+	UserBound bool
 }
 
 type Input struct {
@@ -75,7 +88,8 @@ func (g *Gateway) Ingest(ctx context.Context, principal Principal, input Input) 
 		if !principal.DeploymentBound || (input.SessionID == "" && input.ConversationID == "") {
 			return observation.Event{}, false, ErrInvalidPrincipal
 		}
-	} else if (principal.AccessLevel != observation.Level1 && principal.AccessLevel != observation.Level2) || !principal.AgentBound {
+	} else if (principal.AccessLevel != observation.Level1 && principal.AccessLevel != observation.Level2) ||
+		!(principal.AgentBound || principal.UserBound) {
 		return observation.Event{}, false, ErrInvalidPrincipal
 	}
 	if input.OccurredAt.IsZero() {

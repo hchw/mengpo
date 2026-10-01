@@ -55,6 +55,9 @@ func DevSeed(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	}); err != nil {
 		return fmt.Errorf("seed membership: %w", err)
 	}
+	if err := ensureOwnerRole(ctx, db, user.ID, tenantID); err != nil {
+		return fmt.Errorf("seed owner role: %w", err)
+	}
 	if logger != nil {
 		logger.Info("dev seed ready", "email", DevSeedEmail, "tenant_id", tenantID)
 	}
@@ -92,4 +95,22 @@ func newSeedID() (string, error) {
 	value[6] = (value[6] & 0x0f) | 0x40
 	value[8] = (value[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16]), nil
+}
+
+// ensureOwnerRole grants the seeded user the tenant "owner" role so the console
+// exposes admin-only operations (provider and schedule management) in dev.
+func ensureOwnerRole(ctx context.Context, db *sql.DB, userID, tenantID string) error {
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO public.roles (id, tenant_id, name) VALUES (gen_random_uuid(), $1, 'owner')
+ON CONFLICT (tenant_id, name) WHERE tenant_id IS NOT NULL DO NOTHING`, tenantID); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `
+INSERT INTO public.membership_roles (membership_id, role_id)
+SELECT m.id, r.id
+FROM public.tenant_memberships m
+JOIN public.roles r ON r.tenant_id = m.tenant_id AND r.name = 'owner'
+WHERE m.user_id = $1 AND m.tenant_id = $2
+ON CONFLICT DO NOTHING`, userID, tenantID)
+	return err
 }

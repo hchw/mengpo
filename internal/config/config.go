@@ -36,6 +36,11 @@ type Config struct {
 	Providers ProviderConfig
 	Queue     QueueConfig
 	Security  SecurityConfig
+	Analysis  AnalysisConfig
+	Scheduler SchedulerConfig
+	// MasterKey encrypts per-tenant provider secrets at rest. It is only ever
+	// injected from the orchestrator secret store and is never persisted.
+	MasterKey string
 }
 
 type AuthConfig struct {
@@ -54,10 +59,26 @@ type ProviderConfig struct {
 }
 
 type LLMConfig struct {
-	Enabled bool
-	BaseURL string
-	Model   string
-	APIKey  string
+	Enabled     bool
+	BaseURL     string
+	Model       string
+	APIKey      string
+	Timeout     time.Duration
+	MaxAttempts int
+}
+
+// AnalysisConfig tunes the analytics pipeline: the response token budget and
+// how many events a single maintenance call may batch.
+type AnalysisConfig struct {
+	MaxTokens            int
+	MaintenanceBatchSize int
+}
+
+// SchedulerConfig selects the periodic-scheduling component. Adapter is one of
+// "internal" (in-process) or "none" (disabled).
+type SchedulerConfig struct {
+	Adapter         string
+	DefaultInterval time.Duration
 }
 
 type EmbeddingConfig struct {
@@ -114,10 +135,12 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		Scopes: []string{"user-global", "session"},
 		Providers: ProviderConfig{
 			MemoryLLM: LLMConfig{
-				Enabled: false,
-				BaseURL: envString(lookup, envNames("MEMORY_LLM_BASE_URL"), ""),
-				Model:   envString(lookup, envNames("MEMORY_LLM_MODEL"), ""),
-				APIKey:  envString(lookup, envNames("MEMORY_LLM_API_KEY"), ""),
+				Enabled:     false,
+				BaseURL:     envString(lookup, envNames("MEMORY_LLM_BASE_URL"), ""),
+				Model:       envString(lookup, envNames("MEMORY_LLM_MODEL"), ""),
+				APIKey:      envString(lookup, envNames("MEMORY_LLM_API_KEY"), ""),
+				Timeout:     30 * time.Second,
+				MaxAttempts: 3,
 			},
 			Embedding: EmbeddingConfig{
 				Enabled:    false,
@@ -140,6 +163,15 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		Security: SecurityConfig{
 			MaxRequestBytes: 1 << 20,
 		},
+		Analysis: AnalysisConfig{
+			MaxTokens:            2048,
+			MaintenanceBatchSize: 50,
+		},
+		Scheduler: SchedulerConfig{
+			Adapter:         "internal",
+			DefaultInterval: 24 * time.Hour,
+		},
+		MasterKey: strings.TrimSpace(envString(lookup, envNames("MEMORY_CONFIG_MASTER_KEY"), "")),
 	}
 
 	var err error
@@ -165,6 +197,28 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	if cfg.Providers.Reranker.Enabled, err = envBool(lookup, envNames("MEMORY_RERANKER_ENABLED", "RERANKER_ENABLED"), cfg.Providers.Reranker.Enabled); err != nil {
+		return Config{}, err
+	}
+	if cfg.Providers.MemoryLLM.Timeout, err = envDuration(lookup, envNames("MEMORY_LLM_TIMEOUT"), cfg.Providers.MemoryLLM.Timeout); err != nil {
+		return Config{}, err
+	}
+	var llmMaxAttempts int64
+	if llmMaxAttempts, err = envInt64(lookup, envNames("MEMORY_LLM_MAX_ATTEMPTS"), int64(cfg.Providers.MemoryLLM.MaxAttempts)); err != nil {
+		return Config{}, err
+	}
+	cfg.Providers.MemoryLLM.MaxAttempts = int(llmMaxAttempts)
+	var maxTokens int64
+	if maxTokens, err = envInt64(lookup, envNames("MEMORY_ANALYSIS_MAX_TOKENS"), int64(cfg.Analysis.MaxTokens)); err != nil {
+		return Config{}, err
+	}
+	cfg.Analysis.MaxTokens = int(maxTokens)
+	var maintenanceBatch int64
+	if maintenanceBatch, err = envInt64(lookup, envNames("MEMORY_MAINTENANCE_BATCH_SIZE"), int64(cfg.Analysis.MaintenanceBatchSize)); err != nil {
+		return Config{}, err
+	}
+	cfg.Analysis.MaintenanceBatchSize = int(maintenanceBatch)
+	cfg.Scheduler.Adapter = envString(lookup, envNames("MEMORY_SCHEDULER_ADAPTER"), cfg.Scheduler.Adapter)
+	if cfg.Scheduler.DefaultInterval, err = envDuration(lookup, envNames("MEMORY_SCHEDULE_DEFAULT_INTERVAL"), cfg.Scheduler.DefaultInterval); err != nil {
 		return Config{}, err
 	}
 	if cfg.Security.AllowExternalLLMAnalysis, err = envBool(lookup, envNames("MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS", "ALLOW_EXTERNAL_LLM_ANALYSIS"), false); err != nil {
@@ -223,6 +277,18 @@ func (c Config) Validate() error {
 	if c.Providers.Embedding.Enabled && c.Providers.Embedding.Artifact == "" {
 		return errors.New("enabled embedding provider requires MEMORY_EMBEDDING_ARTIFACT")
 	}
+	if c.Providers.MemoryLLM.Timeout <= 0 || c.Providers.MemoryLLM.MaxAttempts < 1 {
+		return errors.New("MEMORY_LLM_TIMEOUT must be positive and MEMORY_LLM_MAX_ATTEMPTS at least 1")
+	}
+	if c.Analysis.MaxTokens <= 0 || c.Analysis.MaintenanceBatchSize <= 0 {
+		return errors.New("MEMORY_ANALYSIS_MAX_TOKENS and MEMORY_MAINTENANCE_BATCH_SIZE must be positive")
+	}
+	if c.Scheduler.Adapter != "internal" && c.Scheduler.Adapter != "none" {
+		return fmt.Errorf("unsupported MEMORY_SCHEDULER_ADAPTER %q", c.Scheduler.Adapter)
+	}
+	if c.Scheduler.DefaultInterval <= 0 {
+		return errors.New("MEMORY_SCHEDULE_DEFAULT_INTERVAL must be positive")
+	}
 	if c.Queue.Adapter != "nats-core" && c.Queue.Adapter != "none" {
 		return fmt.Errorf("unsupported MEMORY_QUEUE_ADAPTER/MQ_ADAPTER %q", c.Queue.Adapter)
 	}
@@ -240,29 +306,36 @@ func (c Config) Validate() error {
 // consistency test that keeps deployment manifests and docs aligned.
 func EnvNames() map[string][]string {
 	return map[string][]string{
-		"app_env":               envNames("MEMORY_APP_ENV", "APP_ENV"),
-		"http_addr":             envNames("MEMORY_HTTP_ADDR", "HTTP_ADDR"),
-		"http_request_timeout":  envNames("MEMORY_HTTP_REQUEST_TIMEOUT", "HTTP_REQUEST_TIMEOUT"),
-		"database_url":          envNames("MEMORY_DATABASE_URL", "DATABASE_URL"),
-		"redis_url":             envNames("MEMORY_REDIS_URL"),
-		"migrate_on_start":      envNames("MEMORY_MIGRATE_ON_START"),
-		"auth_session_ttl":      envNames("MEMORY_AUTH_SESSION_TTL", "AUTH_SESSION_TTL"),
-		"auth_cookie_secure":    envNames("MEMORY_AUTH_COOKIE_SECURE", "AUTH_COOKIE_SECURE"),
-		"llm_enabled":           envNames("MEMORY_LLM_ENABLED"),
-		"llm_base_url":          envNames("MEMORY_LLM_BASE_URL"),
-		"llm_model":             envNames("MEMORY_LLM_MODEL"),
-		"llm_api_key":           envNames("MEMORY_LLM_API_KEY"),
-		"embedding_enabled":     envNames("MEMORY_EMBEDDING_ENABLED", "EMBEDDING_ENABLED"),
-		"embedding_artifact":    envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"),
-		"embedding_binary":      envNames("MEMORY_EMBEDDING_BINARY", "EMBEDDING_BINARY"),
-		"reranker_enabled":      envNames("MEMORY_RERANKER_ENABLED", "RERANKER_ENABLED"),
-		"reranker_base_url":     envNames("MEMORY_RERANKER_BASE_URL", "RERANKER_BASE_URL"),
-		"reranker_model":        envNames("MEMORY_RERANKER_MODEL", "RERANKER_MODEL"),
-		"reranker_api_key":      envNames("MEMORY_RERANKER_API_KEY", "RERANKER_API_KEY"),
-		"queue_adapter":         envNames("MEMORY_QUEUE_ADAPTER", "MQ_ADAPTER"),
-		"queue_url":             envNames("MEMORY_NATS_URL", "MQ_URL"),
-		"max_request_bytes":     envNames("MEMORY_MAX_REQUEST_BYTES", "MAX_REQUEST_BYTES"),
-		"external_llm_analysis": envNames("MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS", "ALLOW_EXTERNAL_LLM_ANALYSIS"),
+		"app_env":                   envNames("MEMORY_APP_ENV", "APP_ENV"),
+		"http_addr":                 envNames("MEMORY_HTTP_ADDR", "HTTP_ADDR"),
+		"http_request_timeout":      envNames("MEMORY_HTTP_REQUEST_TIMEOUT", "HTTP_REQUEST_TIMEOUT"),
+		"database_url":              envNames("MEMORY_DATABASE_URL", "DATABASE_URL"),
+		"redis_url":                 envNames("MEMORY_REDIS_URL"),
+		"migrate_on_start":          envNames("MEMORY_MIGRATE_ON_START"),
+		"auth_session_ttl":          envNames("MEMORY_AUTH_SESSION_TTL", "AUTH_SESSION_TTL"),
+		"auth_cookie_secure":        envNames("MEMORY_AUTH_COOKIE_SECURE", "AUTH_COOKIE_SECURE"),
+		"llm_enabled":               envNames("MEMORY_LLM_ENABLED"),
+		"llm_base_url":              envNames("MEMORY_LLM_BASE_URL"),
+		"llm_model":                 envNames("MEMORY_LLM_MODEL"),
+		"llm_api_key":               envNames("MEMORY_LLM_API_KEY"),
+		"llm_timeout":               envNames("MEMORY_LLM_TIMEOUT"),
+		"llm_max_attempts":          envNames("MEMORY_LLM_MAX_ATTEMPTS"),
+		"analysis_max_tokens":       envNames("MEMORY_ANALYSIS_MAX_TOKENS"),
+		"maintenance_batch_size":    envNames("MEMORY_MAINTENANCE_BATCH_SIZE"),
+		"scheduler_adapter":         envNames("MEMORY_SCHEDULER_ADAPTER"),
+		"schedule_default_interval": envNames("MEMORY_SCHEDULE_DEFAULT_INTERVAL"),
+		"config_master_key":         envNames("MEMORY_CONFIG_MASTER_KEY"),
+		"embedding_enabled":         envNames("MEMORY_EMBEDDING_ENABLED", "EMBEDDING_ENABLED"),
+		"embedding_artifact":        envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"),
+		"embedding_binary":          envNames("MEMORY_EMBEDDING_BINARY", "EMBEDDING_BINARY"),
+		"reranker_enabled":          envNames("MEMORY_RERANKER_ENABLED", "RERANKER_ENABLED"),
+		"reranker_base_url":         envNames("MEMORY_RERANKER_BASE_URL", "RERANKER_BASE_URL"),
+		"reranker_model":            envNames("MEMORY_RERANKER_MODEL", "RERANKER_MODEL"),
+		"reranker_api_key":          envNames("MEMORY_RERANKER_API_KEY", "RERANKER_API_KEY"),
+		"queue_adapter":             envNames("MEMORY_QUEUE_ADAPTER", "MQ_ADAPTER"),
+		"queue_url":                 envNames("MEMORY_NATS_URL", "MQ_URL"),
+		"max_request_bytes":         envNames("MEMORY_MAX_REQUEST_BYTES", "MAX_REQUEST_BYTES"),
+		"external_llm_analysis":     envNames("MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS", "ALLOW_EXTERNAL_LLM_ANALYSIS"),
 	}
 }
 

@@ -117,3 +117,19 @@ and `make test-web`.
   duplicates, and links them with a `merged_into` relation (evidence is never
   deleted). It is implemented in `internal/adapters/postgres/merge.go` and
   covered by `internal/assembly/console_integration_test.go`.
+## Memory LLM analyst and per-tenant providers
+
+| Requirement | Implementation | Verification |
+| --- | --- | --- |
+| Configurable Memory LLM provider (per tenant) | `internal/application/providerconfig`, `internal/adapters/postgres/provider_config.go` | `internal/application/providerconfig/service_test.go` (`TestEffectivePrecedence`), `internal/adapters/postgres/provider_config_test.go` |
+| Structured, validated candidate output | `internal/adapters/llm/http.go`, `internal/application/analysis/validate.go` | `internal/adapters/llm/http_test.go` (`TestAnalyzeRejectsEvidenceNotInBatch`) |
+| Never bypasses evidence or governance | `internal/adapters/postgres/candidate.go`, `internal/assembly/jobs.go` | `internal/assembly/analyst_e2e_test.go`, `internal/adapters/postgres/candidate_test.go` |
+| Periodic memory maintenance (per tenant) | `internal/application/maintenance`, `internal/assembly/worker.go` | `internal/application/maintenance/maintenance_test.go` |
+| Trigger gating and batching | `internal/domain/observation/signals.go`, `internal/assembly/jobs.go` | `internal/domain/observation/signals_analysis_test.go`, `TestOrdinaryEventNeverCallsModelOrCreatesCandidates`, `TestIdenticalConsolidationReusesCachedResult` |
+| Failure handling and degradation | `internal/application/analysis/fallback.go` | `TestDegradedAnalysisRunIsRecorded`, `internal/application/analysis/fallback_test.go` |
+| Tenant isolation and privacy | `internal/application/analysis/privacy.go`, `internal/assembly/provider.go` | `TestPrivacyRedactionAppliedBeforeRequest`, `TestProviderBuilderHonoursExternalFlag` |
+| Observable and audited runs | `internal/ports/analyst_ops.go`, `internal/adapters/postgres/analyst_runs.go` | `internal/adapters/postgres/analyst_runs_test.go`, `internal/observability/ops_metrics_test.go` |
+| Replaceable scheduler component | `internal/ports/scheduler.go`, `internal/adapters/scheduler` | `internal/adapters/scheduler/scheduler_test.go` |
+| Per-tenant schedules | `db/migrations/platform/000004_tenant_schedules.sql`, `internal/adapters/postgres/schedule.go` | `internal/adapters/postgres/schedule_test.go` |
+| Single execution across replicas | `internal/adapters/postgres/advisory.go` | `internal/adapters/postgres/advisory_test.go` |
+| Tenant-scoped configuration API and visibility | `internal/assembly/console_ops.go`, `web/src/pages/AnalysisRunsPage.tsx`, `web/src/pages/SettingsPage.tsx` | `internal/assembly/console_ops_test.go`, `web/src/pages/pages.test.tsx` |

@@ -68,3 +68,78 @@ func (r *NormalizedEventRepository) MarkRawEventProcessed(ctx context.Context, t
 		return nil
 	})
 }
+
+// ListPendingAnalysisEvents returns normalized events in stable order, starting
+// at offset. Maintenance uses the offset as its cursor so replays are stable.
+func (r *NormalizedEventRepository) ListPendingAnalysisEvents(ctx context.Context, tenantID string, offset, limit int) ([]ports.PendingAnalysisEvent, error) {
+	if tenantID == "" || limit <= 0 {
+		return nil, ports.ErrInvalidNormalizedEvent
+	}
+	var result []ports.PendingAnalysisEvent
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+SELECT ne.id::text, ne.raw_event_id::text, COALESCE(oe.session_id::text, ''), oe.occurred_at, ne.normalized_payload, ne.sequence
+FROM normalized_events ne
+JOIN observed_events oe ON oe.id = ne.raw_event_id
+ORDER BY ne.created_at, ne.id
+OFFSET $1 LIMIT $2`, offset, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item ports.PendingAnalysisEvent
+			var sequence sql.NullInt64
+			var payload []byte
+			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.SessionID, &item.OccurredAt, &payload, &sequence); err != nil {
+				return err
+			}
+			item.Payload = json.RawMessage(payload)
+			if sequence.Valid {
+				value := sequence.Int64
+				item.Sequence = &value
+			}
+			result = append(result, item)
+		}
+		return rows.Err()
+	})
+	return result, err
+}
+
+// LoadAnalysisEventsByRawIDs returns the normalized events for the given raw
+// event ids, preserving the input order where possible.
+func (r *NormalizedEventRepository) LoadAnalysisEventsByRawIDs(ctx context.Context, tenantID string, rawEventIDs []string) ([]ports.PendingAnalysisEvent, error) {
+	if tenantID == "" || len(rawEventIDs) == 0 {
+		return nil, ports.ErrInvalidNormalizedEvent
+	}
+	var result []ports.PendingAnalysisEvent
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+SELECT ne.id::text, ne.raw_event_id::text, COALESCE(oe.session_id::text, ''), oe.occurred_at, ne.normalized_payload, ne.sequence
+FROM normalized_events ne
+JOIN observed_events oe ON oe.id = ne.raw_event_id
+WHERE ne.raw_event_id = ANY($1::uuid[])`, uuidArrayLiteral(rawEventIDs))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item ports.PendingAnalysisEvent
+			var sequence sql.NullInt64
+			var payload []byte
+			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.SessionID, &item.OccurredAt, &payload, &sequence); err != nil {
+				return err
+			}
+			item.Payload = json.RawMessage(payload)
+			if sequence.Valid {
+				value := sequence.Int64
+				item.Sequence = &value
+			}
+			result = append(result, item)
+		}
+		return rows.Err()
+	})
+	return result, err
+}
+
+var _ ports.NormalizedEventReader = (*NormalizedEventRepository)(nil)

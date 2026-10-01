@@ -10,10 +10,16 @@ import (
 	"time"
 
 	"github.com/hchw/mengpo/internal/adapters/embedding"
+	"github.com/hchw/mengpo/internal/adapters/llm"
 	"github.com/hchw/mengpo/internal/adapters/nats"
 	"github.com/hchw/mengpo/internal/adapters/postgres"
+	"github.com/hchw/mengpo/internal/adapters/redis"
+	"github.com/hchw/mengpo/internal/adapters/scheduler"
 	"github.com/hchw/mengpo/internal/application/analysis"
 	embeddingapp "github.com/hchw/mengpo/internal/application/embedding"
+	"github.com/hchw/mengpo/internal/application/governance"
+	"github.com/hchw/mengpo/internal/application/maintenance"
+	"github.com/hchw/mengpo/internal/application/providerconfig"
 	"github.com/hchw/mengpo/internal/config"
 	"github.com/hchw/mengpo/internal/observability"
 	"github.com/hchw/mengpo/internal/platform/registry"
@@ -46,6 +52,9 @@ type WorkerOptions struct {
 	Outbox          ports.OutboxRepository
 	Notifier        ports.PubSub
 	Embedding       EmbeddingRunner
+	Runner          *workers.OutboxRunner
+	Scheduler       ports.Scheduler
+	Providers       *providerconfig.Service
 	WorkerID        string
 	PollInterval    time.Duration
 	EmbeddingPeriod time.Duration
@@ -103,15 +112,102 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		embeddings := postgres.NewEmbeddingRepository(router)
 		options.Embedding = embeddingapp.NewWorker(embeddings, embeddings, embedder, 0, 0)
 	}
+	providerService, err := NewProviderService(cfg, router, newProviderAnalystBuilder(cfg))
+	if err != nil {
+		return nil, err
+	}
+	dynamic := &providerconfig.Dynamic{Service: providerService}
+	providerService.Dynamic = dynamic
+	promptVersion := "rule-v1"
+	provider := ""
+	if cfg.Providers.MemoryLLM.Enabled {
+		promptVersion = llm.PromptVersion
+		provider = "memory-llm"
+	}
 	dispatcher := &JobDispatcher{
 		Observations:         postgres.NewObservationRepository(router),
 		Normalized:           postgres.NewNormalizedEventRepository(router),
-		Analysis:             analysis.New(analysis.Providers{Analyst: analysis.RuleFallback{}}),
+		Analysis:             analysis.NewWithPrivacy(analysis.Providers{Analyst: dynamic}, analysis.PrivacyPolicy{}),
+		AnalysisReader:       postgres.NewNormalizedEventRepository(router),
+		Candidates:           postgres.NewCandidateRepository(router),
+		SessionOwner:         postgres.NewSessionRepository(router),
+		Runs:                 postgres.NewAnalystRunRepository(router),
+		Audit:                postgres.NewAuditRepository(router),
 		SchemaVersion:        "schema-v1",
 		NormalizationVersion: "normalize-v1",
+		PromptVersion:        promptVersion,
+		Provider:             provider,
+		Model:                cfg.Providers.MemoryLLM.Model,
 		NewID:                newUUID,
 	}
+	opsMetrics := observability.NewOpsMetrics()
+	dispatcher.AnalysisMetrics = opsMetrics
 	options.Handle = dispatcher.Handle
+	options.Providers = providerService
+	runner := &workers.OutboxRunner{
+		Repository:   options.Outbox,
+		Notifier:     options.Notifier,
+		WorkerID:     options.WorkerID,
+		PollInterval: options.PollInterval,
+		Handle:       options.Handle,
+	}
+	options.Runner = runner
+	if cfg.RedisURL != "" {
+		if cache, err := redis.NewCacheFromURL(cfg.RedisURL); err == nil {
+			dispatcher.Cache = cache
+		}
+	}
+	if cfg.Scheduler.Adapter == "internal" {
+		schedulerComponent := scheduler.New(scheduler.Options{
+			Tenants:   store,
+			Locker:    postgres.NewAdvisoryLocker(db),
+			Overrides: postgres.NewTenantScheduleStore(db),
+			Metrics:   opsMetrics,
+			Logger:    options.Logger,
+		})
+		runsRepository := postgres.NewAnalystRunRepository(router)
+		plan := &maintenance.Job{
+			PlanName:  "consolidate",
+			TaskType:  maintenance.TaskTypeConsolidate,
+			BatchSize: cfg.Analysis.MaintenanceBatchSize,
+			Reader:    postgres.NewNormalizedEventRepository(router),
+			Enqueuer:  postgres.NewOutboxRepository(router),
+			Cursors:   runsRepository,
+		}
+		if err := schedulerComponent.Register(plan, ports.Schedule{Name: plan.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		expiry := &maintenance.ExpiryJob{
+			PlanName:   "expiry",
+			Reader:     postgres.NewMemoryRepository(router),
+			Governance: governance.NewService(postgres.NewMemoryRepository(router)),
+			BatchSize:  cfg.Analysis.MaintenanceBatchSize,
+		}
+		if err := schedulerComponent.Register(expiry, ports.Schedule{Name: expiry.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		memoryRepository := postgres.NewMemoryRepository(router)
+		dedupe := &maintenance.DedupeJob{PlanName: "dedupe", Reader: memoryRepository, Runs: runsRepository, BatchSize: cfg.Analysis.MaintenanceBatchSize}
+		if err := schedulerComponent.Register(dedupe, ports.Schedule{Name: dedupe.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		conflict := &maintenance.ConflictJob{
+			PlanName: "conflict", Reader: memoryRepository, Analysis: dispatcher.Analysis, Runs: runsRepository,
+			PromptVersion: promptVersion, SchemaVersion: "schema-v1", BatchSize: cfg.Analysis.MaintenanceBatchSize,
+		}
+		if err := schedulerComponent.Register(conflict, ports.Schedule{Name: conflict.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		cleanup := &maintenance.CleanupJob{PlanName: "cleanup", Outbox: postgres.NewOutboxRepository(router), Runs: runsRepository}
+		if err := schedulerComponent.Register(cleanup, ports.Schedule{Name: cleanup.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		evaluate := &maintenance.EvaluationJob{PlanName: "evaluation", Reader: memoryRepository, Runs: runsRepository}
+		if err := schedulerComponent.Register(evaluate, ports.Schedule{Name: evaluate.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		options.Scheduler = schedulerComponent
+	}
 	return NewWorkerWithOptions(options)
 }
 
@@ -151,26 +247,85 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	w.logger.Info("memory worker starting", slog.Int("tenants", len(tenants)))
 
-	runner := &workers.OutboxRunner{
-		Repository:   w.options.Outbox,
-		Notifier:     w.options.Notifier,
-		Tenants:      tenants,
-		WorkerID:     w.options.WorkerID,
-		PollInterval: w.options.PollInterval,
-		Handle:       w.options.Handle,
+	if w.options.Scheduler != nil {
+		if err := w.options.Scheduler.Start(ctx); err != nil {
+			return fmt.Errorf("start scheduler: %w", err)
+		}
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := w.options.Scheduler.Stop(stopCtx); err != nil {
+				w.logger.Error("stop scheduler", slog.String("error", err.Error()))
+			}
+		}()
 	}
+
 	errs := make(chan error, 2)
-	if len(tenants) > 0 {
-		go func() { errs <- runner.Run(ctx) }()
-	}
-	if w.options.Embedding != nil {
-		go func() { errs <- w.runEmbeddingLoop(ctx, tenants) }()
+	if w.options.Scheduler != nil {
+		// The scheduler drives the durable queue and embedding one pass at a
+		// time; PubSub wake-ups still trigger an immediate pass for latency.
+		if err := w.options.Scheduler.Register(outboxPollJob{name: "outbox", runner: w.options.Runner}, ports.Schedule{Name: "outbox", Cadence: w.options.PollInterval, Enabled: true}); err != nil {
+			return fmt.Errorf("register outbox plan: %w", err)
+		}
+		if w.options.Embedding != nil {
+			if err := w.options.Scheduler.Register(embeddingPlan{name: "embedding", runner: w.options.Embedding}, ports.Schedule{Name: "embedding", Cadence: w.options.EmbeddingPeriod, Enabled: true}); err != nil {
+				return fmt.Errorf("register embedding plan: %w", err)
+			}
+		}
+		go w.runWakeups(ctx)
+	} else {
+		runner := w.options.Runner
+		if runner == nil {
+			runner = &workers.OutboxRunner{
+				Repository:   w.options.Outbox,
+				Notifier:     w.options.Notifier,
+				WorkerID:     w.options.WorkerID,
+				PollInterval: w.options.PollInterval,
+				Handle:       w.options.Handle,
+			}
+		}
+		runner.Tenants = tenants
+		if len(tenants) > 0 {
+			go func() { errs <- runner.Run(ctx) }()
+		}
+		if w.options.Embedding != nil {
+			go func() { errs <- w.runEmbeddingLoop(ctx, tenants) }()
+		}
 	}
 	select {
 	case <-ctx.Done():
 		return nil
 	case err := <-errs:
 		return err
+	}
+}
+
+// runWakeups turns PubSub notifications into immediate single-pass polls so
+// the durable queue keeps low latency even though it is scheduled, not looped.
+func (w *Worker) runWakeups(ctx context.Context) {
+	if w.options.Notifier == nil || w.options.Runner == nil {
+		return
+	}
+	notifications, err := w.options.Notifier.Subscribe(ctx)
+	if err != nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case notification, ok := <-notifications:
+			if !ok {
+				return
+			}
+			tenantID := notification.TenantID
+			if tenantID == "" {
+				continue
+			}
+			if err := w.options.Runner.PollTenant(ctx, tenantID); err != nil && ctx.Err() == nil {
+				w.logger.Error("wake-up poll failed", slog.String("tenant", tenantID), slog.String("error", err.Error()))
+			}
+		}
 	}
 }
 

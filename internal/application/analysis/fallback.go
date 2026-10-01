@@ -72,6 +72,11 @@ func (s ResilientService) Analyze(ctx context.Context, batch ports.AnalysisBatch
 	// Defense in depth: fallback may not accidentally promote analysis to memory candidates.
 	result.Candidates = nil
 	result.Conflicts = nil
+	result.Degraded = true
+	result.DegradedReason = "rules_only"
+	if errors.Is(primaryErr, context.DeadlineExceeded) {
+		result.DegradedReason = "primary_timeout"
+	}
 	return result, nil
 }
 

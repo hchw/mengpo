@@ -10,16 +10,17 @@ import type {
   ProjectionDebug,
   SessionSummary,
 } from './types';
+import type { AnalysisRun, ProviderTestResult, ProviderUpdate, ProviderView, ScheduleStatus, ScheduleUpdate } from './types';
 
 export const ConsolePaths = {
-  sessions: '/api/v1/sessions',
+  sessions: '/api/v1/sessions/list',
   memories: '/api/v1/memories',
   candidates: '/api/v1/candidates',
   project: '/api/v1/project',
   failures: '/api/v1/failures',
   evaluation: '/api/v1/evaluation',
   members: '/api/v1/members',
-  agents: '/api/v1/agents',
+  agents: '/api/v1/agents', providers: '/api/v1/providers', providerTest: '/api/v1/providers/test', schedules: '/api/v1/schedules', analysisRuns: '/api/v1/analysis-runs',
 } as const;
 
 // ConsoleApi is the tenant-scoped read/write surface the console pages use. It
@@ -82,5 +83,24 @@ export class ConsoleApi {
 
   disableAgent(agentId: string): Promise<AgentRecord> {
     return this.client.request<AgentRecord>(`${ConsolePaths.agents}/${agentId}/disable`, { principal: this.principal, scope: this.scope() });
+  }
+
+  getProvider(): Promise<ProviderView> {
+    return this.client.request<ProviderView>(ConsolePaths.providers, { principal: this.principal, scope: this.scope() });
+  }
+  updateProvider(input: ProviderUpdate): Promise<ProviderView> {
+    return this.client.request<ProviderView>(ConsolePaths.providers, { principal: this.principal, scope: this.scope() }, input, 'PUT');
+  }
+  testProvider(input: ProviderUpdate): Promise<ProviderTestResult> {
+    return this.client.request<ProviderTestResult>(ConsolePaths.providerTest, { principal: this.principal, scope: this.scope() }, input);
+  }
+  listSchedules(): Promise<{ items: ScheduleStatus[] }> {
+    return this.client.request<{ items: ScheduleStatus[] }>(ConsolePaths.schedules, { principal: this.principal, scope: this.scope() });
+  }
+  updateSchedule(input: ScheduleUpdate): Promise<unknown> {
+    return this.client.request(ConsolePaths.schedules, { principal: this.principal, scope: this.scope() }, input, 'PUT');
+  }
+  listAnalysisRuns(page = 1, pageSize = 20): Promise<{ items: AnalysisRun[] }> {
+    return this.client.request<{ items: AnalysisRun[] }>(ConsolePaths.analysisRuns, { principal: this.principal, scope: this.scope() }, { page, page_size: pageSize });
   }
 }

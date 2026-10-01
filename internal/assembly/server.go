@@ -21,6 +21,7 @@ import (
 	"github.com/hchw/mengpo/internal/observability"
 	"github.com/hchw/mengpo/internal/platform/registry"
 	"github.com/hchw/mengpo/internal/platform/tenantdb"
+	"github.com/hchw/mengpo/internal/ports"
 )
 
 // Authenticator resolves a trusted Identity from an inbound HTTP request. It is
@@ -77,7 +78,7 @@ func BuildUseCases(cfg config.Config, db *sql.DB) (httpapi.UseCases, error) {
 
 // NewHandler mounts the HTTP surface: health, metrics, console authentication
 // and the tenant-bound /api/v1 command endpoints.
-func NewHandler(cfg config.Config, useCases httpapi.UseCases, auth Authenticator, authAPI *AuthAPI, consoleAPI *ConsoleAPI, readiness func(context.Context) error, logger *slog.Logger, metrics *observability.Metrics) http.Handler {
+func NewHandler(cfg config.Config, useCases httpapi.UseCases, auth Authenticator, authAPI *AuthAPI, consoleAPI *ConsoleAPI, ops *ConsoleOps, readiness func(context.Context) error, logger *slog.Logger, metrics *observability.Metrics) http.Handler {
 	if logger == nil {
 		logger = observability.NewLogger(os.Stderr)
 	}
@@ -93,6 +94,9 @@ func NewHandler(cfg config.Config, useCases httpapi.UseCases, auth Authenticator
 	}
 	if consoleAPI != nil {
 		consoleAPI.Register(mux)
+	}
+	if ops != nil {
+		ops.Register(mux)
 	}
 	return metrics.Middleware(logger, authMiddleware(auth, mux))
 }
@@ -151,23 +155,38 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 	metrics := &observability.Metrics{}
 	readiness := func(ctx context.Context) error { return pingDB(ctx, db) }
 	authAPI := &AuthAPI{Service: identityService, CookieName: cfg.Auth.SessionCookieName, CookieSecure: cfg.Auth.SessionCookieSecure}
-	authenticator := SessionAuthenticator{Service: identityService, CookieName: cfg.Auth.SessionCookieName}
+	authenticator := SessionAuthenticator{Service: identityService, CookieName: cfg.Auth.SessionCookieName, Memberships: identityRepo}
 	router := tenantdb.NewRouter(db, registry.NewStore(db))
 	memoryRepository := postgres.NewMemoryRepository(router)
 	consoleAPI := &ConsoleAPI{
 		Memories:   memoryRepository,
 		List:       memoryRepository,
 		Merge:      memoryRepository,
+		Sessions:   postgres.NewSessionRepository(router),
 		Governance: governance.NewService(memoryRepository),
 		Members:    identityRepo,
 		Agents:     postgres.NewAgentRepository(db),
+	}
+	providerService, err := NewProviderService(cfg, router, newProviderAnalystBuilder(cfg))
+	if err != nil {
+		return nil, err
+	}
+	ops := &ConsoleOps{
+		Providers: providerService,
+		Schedules: postgres.NewTenantScheduleStore(db),
+		ScheduleStatus: func(ctx context.Context, tenantID string) ([]ports.ScheduleStatus, error) {
+			return postgres.NewTenantScheduleStore(db).List(ctx, tenantID)
+		},
+		Runs:   postgres.NewAnalystRunRepository(router),
+		Audit:  postgres.NewAuditRepository(router),
+		Logger: logger,
 	}
 	return &Server{
 		cfg:     cfg,
 		db:      db,
 		logger:  logger,
 		metrics: metrics,
-		handler: NewHandler(cfg, useCases, authenticator, authAPI, consoleAPI, readiness, logger, metrics),
+		handler: NewHandler(cfg, useCases, authenticator, authAPI, consoleAPI, ops, readiness, logger, metrics),
 	}, nil
 }
 

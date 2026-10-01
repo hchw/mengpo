@@ -144,3 +144,16 @@ export interface AgentRecord {
   capabilities: string[];
   allowed_scopes: ScopeType[];
 }
+
+export interface ProviderView { provider: string; enabled: boolean; base_url: string; model: string; has_secret: boolean; secret_hint: string; source: 'tenant' | 'env' | 'disabled'; updated_by?: string; updated_at?: string;
+}
+export interface ProviderUpdate { enabled: boolean; base_url: string; model: string; api_key?: string;
+}
+export interface ProviderTestResult { ok: boolean; latency_ms: number; error: string;
+}
+export interface ScheduleStatus { name: string; cadence_seconds: number; next_run_at: string; last_run_at: string; last_status: string; last_error: string; runs: number;
+}
+export interface AnalysisRun { id: string; task_type: string; trigger: string; provider: string; model: string; prompt_version: string; status: string; latency_ms: number; tokens_prompt: number; tokens_completion: number; candidate_count: number; discarded_count: number; conflict_count: number; degraded_reason: string; last_error: string; created_at: string;
+}
+export interface ScheduleUpdate { name: string; cadence_seconds: number; enabled: boolean;
+}

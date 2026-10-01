@@ -119,8 +119,9 @@ func (a *AuthAPI) setCookie(w http.ResponseWriter, token string) {
 
 // SessionAuthenticator resolves a console session token to a trusted identity.
 type SessionAuthenticator struct {
-	Service    *identity.Service
-	CookieName string
+	Service     *identity.Service
+	CookieName  string
+	Memberships tenants.MembershipRepository
 }
 
 func (a SessionAuthenticator) Authenticate(r *http.Request) (agentaccess.Identity, error) {
@@ -134,11 +135,20 @@ func (a SessionAuthenticator) Authenticate(r *http.Request) (agentaccess.Identit
 	if session.TenantID == "" {
 		return agentaccess.Identity{}, identity.ErrSessionRequired
 	}
+	var roles []string
+	if a.Memberships != nil {
+		if record, err := a.Memberships.GetMembership(r.Context(), user.ID, session.TenantID); err == nil {
+			for _, role := range record.Roles {
+				roles = append(roles, role.Name)
+			}
+		}
+	}
 	return agentaccess.Identity{
 		TenantID:     session.TenantID,
 		UserID:       user.ID,
 		SourceID:     user.ID,
 		Capabilities: []string{"observe", "project", "feedback"},
+		Roles:        roles,
 		Source:       agentaccess.SourceVerifiedUser,
 	}, nil
 }

@@ -9,9 +9,13 @@ import (
 // AnalysisBatch carries trusted tenant identity with the input; provider adapters
 // must propagate this identity to cache keys, logs, and any tenant-specific state.
 type AnalysisBatch struct {
-	TenantID      string            `json:"tenant_id"`
-	RunID         string            `json:"run_id"`
-	Events        []AnalysisEvent   `json:"events"`
+	TenantID string          `json:"tenant_id"`
+	RunID    string          `json:"run_id"`
+	TaskType string          `json:"task_type,omitempty"`
+	Events   []AnalysisEvent `json:"events"`
+	// Candidates carries already-persisted candidates so a conflict scan can
+	// reason about them. It is empty for event-driven analysis.
+	Candidates    []CandidateMemory `json:"candidates,omitempty"`
 	PromptVersion string            `json:"prompt_version"`
 	SchemaVersion string            `json:"schema_version"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
@@ -52,11 +56,24 @@ type ConflictAssessment struct {
 	ReasonCode   string   `json:"reason_code"`
 }
 
+// AnalysisUsage reports provider metering for a single analysis call. It is
+// optional and only populated by providers that return usage data.
+type AnalysisUsage struct {
+	PromptTokens     int   `json:"prompt_tokens"`
+	CompletionTokens int   `json:"completion_tokens"`
+	LatencyMS        int64 `json:"latency_ms"`
+}
+
 type AnalystResult struct {
 	Classifications []Classification     `json:"classifications,omitempty"`
 	Failures        []FailureAssessment  `json:"failures,omitempty"`
 	Candidates      []CandidateMemory    `json:"candidates,omitempty"`
 	Conflicts       []ConflictAssessment `json:"conflicts,omitempty"`
+	Usage           *AnalysisUsage       `json:"usage,omitempty"`
+	// Degraded marks a result produced by the rule fallback after the primary
+	// provider failed. It is recorded on the analysis run for audit.
+	Degraded       bool   `json:"degraded,omitempty"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }
 
 type MemoryAnalyst interface {

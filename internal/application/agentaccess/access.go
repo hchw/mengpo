@@ -32,8 +32,11 @@ type Identity struct {
 	SessionID    string
 	ScopeType    string
 	Capabilities []string
-	Source       IdentitySource
-	AccessLevel  observation.AccessLevel
+	// Roles are the caller's tenant-scoped role names, used for admin-only
+	// console operations. They are resolved from the active membership.
+	Roles       []string
+	Source      IdentitySource
+	AccessLevel observation.AccessLevel
 }
 
 type Scoped struct {

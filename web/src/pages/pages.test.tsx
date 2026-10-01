@@ -9,8 +9,10 @@ import { ProjectionDebuggerPage } from './ProjectionDebuggerPage';
 import { FailureAnalysisPage } from './FailureAnalysisPage';
 import { MemoryEvaluationPage } from './MemoryEvaluationPage';
 import { MembersPage } from './MembersPage';
+import { SettingsPage } from './SettingsPage';
+import { AnalysisRunsPage } from './AnalysisRunsPage';
 import { ApiClientError } from '../api/client';
-import { agent, candidate, evaluation, failure, fakeConsoleApi, member, memory, page, projection, session } from '../test/fakes';
+import { agent, analysisRun, candidate, evaluation, failure, fakeConsoleApi, member, memory, page, projection, provider, scheduleStatus, session } from '../test/fakes';
 
 const user = userEvent.setup();
 
@@ -138,5 +140,52 @@ describe('MembersPage', () => {
     expect(screen.getAllByText('Permission required').length).toBeGreaterThan(0);
     expect(screen.queryByLabelText('role for u1@example.com')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'disable' })).not.toBeInTheDocument();
+  });
+});
+
+describe('SettingsPage providers', () => {
+  it('lets an administrator save and test the provider without echoing the secret', async () => {
+    const api = fakeConsoleApi({
+      getProvider: vi.fn(async () => provider({ enabled: true, base_url: 'https://llm.example', model: 'm', has_secret: true, secret_hint: '****cret', source: 'tenant' })),
+    });
+    render(<SettingsPage api={api} role="owner" tenant={{ id: 't1', name: 'Demo', status: 'active', role: 'owner' }} />);
+    await waitFor(() => expect(screen.getByTestId('provider-secret').textContent).toBe('****cret'));
+    expect(screen.getByTestId('provider-source').textContent).toBe('tenant');
+    await user.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(screen.getByTestId('provider-test-status').textContent).toContain('ok'));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByTestId('provider-save-status').textContent).toBe('saved'));
+    expect(api.updateProvider).toHaveBeenCalled();
+  });
+
+  it('hides the provider form from non-administrators', async () => {
+    render(<SettingsPage api={fakeConsoleApi()} role="member" tenant={{ id: 't1', name: 'Demo', status: 'active', role: 'member' }} />);
+    await waitFor(() => expect(screen.getByTestId('provider-readonly')).toBeInTheDocument());
+    expect(screen.queryByLabelText('api_key')).not.toBeInTheDocument();
+  });
+});
+
+describe('AnalysisRunsPage', () => {
+  it('shows the tenant curation schedule and run records', async () => {
+    const api = fakeConsoleApi({
+      listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
+      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1'), analysisRun('run-2', { status: 'dead_letter', degraded_reason: 'rules_only' })] })),
+    });
+    render(<AnalysisRunsPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('analysis-runs').children.length).toBeGreaterThan(0));
+    expect(screen.getByTestId('schedule-cadence').textContent).toBe('86400s');
+    expect(screen.getByTestId('schedule-status').textContent).toBe('ok');
+    expect(screen.getByTestId('analysis-run-run-1').textContent).toContain('consolidate_memory');
+    expect(screen.getByTestId('analysis-run-run-2').textContent).toContain('rules_only');
+    expect(screen.getByTestId('curation-schedule').dataset.failing).toBe('false');
+  });
+
+  it('highlights a failing schedule', async () => {
+    const api = fakeConsoleApi({
+      listSchedules: vi.fn(async () => ({ items: [scheduleStatus({ last_status: 'error', last_error: 'provider unavailable' })] })),
+    });
+    render(<AnalysisRunsPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('curation-schedule').dataset.failing).toBe('true'));
+    expect(screen.getByTestId('schedule-status').textContent).toContain('provider unavailable');
   });
 });

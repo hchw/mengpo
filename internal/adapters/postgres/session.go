@@ -90,3 +90,50 @@ func (r *SessionRepository) BindSession(ctx context.Context, binding ports.Sessi
 	}
 	return boundID, nil
 }
+
+// ListSessions lists tenant sessions for the console, newest first, optionally
+// filtered by user and status.
+func (r *SessionRepository) ListSessions(ctx context.Context, tenantID string, request ports.SessionListRequest) (ports.SessionListPage, error) {
+	if tenantID == "" {
+		return ports.SessionListPage{}, ports.ErrSessionNotFound
+	}
+	page := request.Page
+	if page < 1 {
+		page = 1
+	}
+	size := request.PageSize
+	if size < 1 {
+		size = 20
+	}
+	if size > 200 {
+		size = 200
+	}
+	statuses := "{}"
+	if len(request.Statuses) > 0 {
+		statuses = uuidArrayLiteral(request.Statuses)
+	}
+	scope := ` ($1 = '' OR user_id = NULLIF($1, '')::uuid) AND (cardinality($2::text[]) = 0 OR status = ANY($2::text[]))`
+	result := ports.SessionListPage{Page: page, PageSize: size}
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE`+scope, request.UserID, statuses).Scan(&result.Total); err != nil {
+			return fmt.Errorf("count sessions: %w", err)
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT id::text, title, status, started_at, updated_at FROM sessions WHERE`+scope+` ORDER BY updated_at DESC, id LIMIT $3 OFFSET $4`, request.UserID, statuses, size, (page-1)*size)
+		if err != nil {
+			return fmt.Errorf("list sessions: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item ports.SessionSummaryRecord
+			if err := rows.Scan(&item.ID, &item.Title, &item.Status, &item.StartedAt, &item.UpdatedAt); err != nil {
+				return fmt.Errorf("scan session: %w", err)
+			}
+			result.Items = append(result.Items, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return ports.SessionListPage{}, err
+	}
+	return result, nil
+}

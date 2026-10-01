@@ -42,5 +42,10 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return fmt.Errorf("database is required")
 	}
-	return registry.ApplyPlatformMigrations(ctx, db)
+	if err := registry.ApplyPlatformMigrations(ctx, db); err != nil {
+		return err
+	}
+	// Bring existing tenants up to the latest tenant migrations, not just newly
+	// provisioned ones.
+	return registry.UpgradeTenantSchemas(ctx, db)
 }

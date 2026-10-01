@@ -158,3 +158,55 @@ func confidenceRank(level FailureConfidence) int {
 		return 1
 	}
 }
+
+// Analysis task identifiers handed to the Memory LLM. A gated event maps to
+// exactly one task so the prompt matches the intent.
+const (
+	TaskClassification  = "classify_event"
+	TaskFailureAnalysis = "analyze_failure"
+	TaskConsolidation   = "consolidate_memory"
+	TaskConflictScan    = "analyze_conflict"
+)
+
+var memoryIntentMarkers = []string{"remember", "forget", "correct", "preference", "conflict", "memory_intent"}
+
+// HasMemoryIntent reports whether the event carries an explicit instruction to
+// change long-term memory. It is a local, cheap rule: no model is involved.
+func HasMemoryIntent(event Event) bool {
+	kind := strings.ToLower(event.MessageType)
+	for _, marker := range memoryIntentMarkers {
+		if strings.Contains(kind, marker) {
+			return true
+		}
+	}
+	if event.SourceType != SourceUser {
+		return false
+	}
+	payload := map[string]any{}
+	_ = json.Unmarshal(event.Payload, &payload)
+	if truthy(payload["remember"]) || truthy(payload["forget"]) {
+		return true
+	}
+	if intent, ok := payload["memory_intent"].(string); ok && strings.TrimSpace(intent) != "" {
+		return true
+	}
+	return false
+}
+
+// AnalysisTask pre-screens an event using local rules only. It returns the task
+// the Memory LLM should run and whether analysis is required at all. Ordinary
+// events return ("", false): they are normalized but never sent to the model.
+func AnalysisTask(event Event) (string, bool) {
+	for _, signal := range DetectSignals(event) {
+		if signal.Kind == SignalFailure {
+			return TaskFailureAnalysis, true
+		}
+	}
+	if _, ok := DetectUserCorrection(event); ok {
+		return TaskConsolidation, true
+	}
+	if HasMemoryIntent(event) {
+		return TaskConsolidation, true
+	}
+	return "", false
+}
