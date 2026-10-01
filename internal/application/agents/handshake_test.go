@@ -35,6 +35,16 @@ func (r *memoryRepository) RotateCredential(_ context.Context, agentID string, c
 	return nil
 }
 
+func (r *memoryRepository) DisableAgent(_ context.Context, agentID string) error {
+	agent, ok := r.agents[agentID]
+	if !ok {
+		return ErrInvalidAgent
+	}
+	agent.Status = auth.AgentDisabled
+	r.agents[agentID] = agent
+	return nil
+}
+
 func (r *memoryRepository) FindByCredentialHash(_ context.Context, secretHash []byte) (auth.Agent, auth.AgentCredential, error) {
 	for agentID, credential := range r.credentials {
 		if bytes.Equal(secretHash, credential.SecretHash) {
@@ -174,5 +184,57 @@ func TestHandshakeRejectsExpiredCredentialAndUnsupportedProtocol(t *testing.T) {
 	}
 	if _, err := service.Handshake(context.Background(), HandshakeRequest{ProtocolVersion: "unknown"}); !errors.Is(err, ErrUnsupportedProtocol) {
 		t.Fatalf("unsupported protocol error = %v, want ErrUnsupportedProtocol", err)
+	}
+}
+
+func TestDisableAgentBlocksHandshakeAndRotation(t *testing.T) {
+	repository := newMemoryRepository()
+	service := NewService(repository)
+	agent, secret, err := service.Register(context.Background(), tenantAdminContext("tenant-a"), RegisterRequest{
+		Name: "agent", AllowedUserIDs: []string{"user-1"}, AllowedScopes: []string{ScopeUserGlobal}, Capabilities: []string{"project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DisableAgent(context.Background(), tenantAdminContext("tenant-a"), agent.ID); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := service.Handshake(context.Background(), HandshakeRequest{Credential: secret, ProtocolVersion: ProtocolV1, UserID: "user-1", ScopeType: ScopeUserGlobal}); !errors.Is(err, ErrInvalidHandshake) {
+		t.Fatalf("disabled agent handshake = %v, want ErrInvalidHandshake", err)
+	}
+	nonAdmin := tenantAdminContext("tenant-a")
+	nonAdmin.Permissions = nil
+	if err := service.DisableAgent(context.Background(), nonAdmin, agent.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("disable without permission = %v, want ErrForbidden", err)
+	}
+}
+
+func TestRotatedCredentialReplacesExpiredVerifier(t *testing.T) {
+	repository := newMemoryRepository()
+	service := NewService(repository)
+	agent, oldSecret, err := service.Register(context.Background(), tenantAdminContext("tenant-a"), RegisterRequest{
+		Name: "agent", AllowedUserIDs: []string{"user-1"}, AllowedScopes: []string{ScopeUserGlobal}, Capabilities: []string{"project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := repository.credentials[agent.ID]
+	credential.ExpiresAt = time.Now().Add(-time.Minute)
+	repository.credentials[agent.ID] = credential
+	if _, err := service.Handshake(context.Background(), HandshakeRequest{Credential: oldSecret, ProtocolVersion: ProtocolV1, UserID: "user-1", ScopeType: ScopeUserGlobal}); !errors.Is(err, ErrInvalidHandshake) {
+		t.Fatalf("expired credential = %v, want ErrInvalidHandshake", err)
+	}
+	rotated, err := service.RotateCredential(context.Background(), tenantAdminContext("tenant-a"), agent.ID)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rotated == oldSecret {
+		t.Fatal("rotation reused the previous secret")
+	}
+	if _, err := service.Handshake(context.Background(), HandshakeRequest{Credential: rotated, ProtocolVersion: ProtocolV1, UserID: "user-1", ScopeType: ScopeUserGlobal}); err != nil {
+		t.Fatalf("rotated credential handshake: %v", err)
+	}
+	if _, err := service.Handshake(context.Background(), HandshakeRequest{Credential: oldSecret, ProtocolVersion: ProtocolV1, UserID: "user-1", ScopeType: ScopeUserGlobal}); !errors.Is(err, ErrInvalidHandshake) {
+		t.Fatalf("old credential still valid: %v", err)
 	}
 }

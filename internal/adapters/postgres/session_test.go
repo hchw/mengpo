@@ -97,3 +97,50 @@ func TestSessionScopeAuthorizationCannotCrossTenantSchemas(t *testing.T) {
 		t.Fatalf("tenant B memory lookup = %v, want ErrMemoryNotFound", err)
 	}
 }
+
+func TestBindSessionIsIdempotentAndTenantScoped(t *testing.T) {
+	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set MEMORY_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.ApplyPlatformMigrations(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	store := registry.NewStore(db)
+	tenantA := createMigratedTenant(t, ctx, db, store, "session bind tenant A")
+	tenantB := createMigratedTenant(t, ctx, db, store, "session bind tenant B")
+	t.Cleanup(func() {
+		for _, tenant := range []auth.Tenant{tenantA, tenantB} {
+			_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
+			_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id = $1`, tenant.ID)
+		}
+	})
+	router := tenantdb.NewRouter(db, store)
+	sessions := NewSessionRepository(router)
+	userID := "00000000-0000-4000-8000-000000000101"
+	agentID := "00000000-0000-4000-8000-000000000102"
+	first := "00000000-0000-4000-8000-000000000103"
+	if bound, err := sessions.BindSession(ctx, ports.SessionBinding{TenantID: tenantA.ID, SessionID: first, UserID: userID, AgentID: agentID, ExternalID: "ext-1", Title: "chat"}); err != nil || bound != first {
+		t.Fatalf("first bind = %q, %v", bound, err)
+	}
+	retry := "00000000-0000-4000-8000-000000000104"
+	if bound, err := sessions.BindSession(ctx, ports.SessionBinding{TenantID: tenantA.ID, SessionID: retry, UserID: userID, AgentID: agentID, ExternalID: "ext-1"}); err != nil || bound != first {
+		t.Fatalf("idempotent retry = %q, %v; want %q", bound, err, first)
+	}
+	if owner, err := sessions.GetSessionOwner(ctx, tenantA.ID, first); err != nil || owner != userID {
+		t.Fatalf("owner = %q, %v", owner, err)
+	}
+	if _, err := sessions.GetSessionOwner(ctx, tenantB.ID, first); !errors.Is(err, ports.ErrSessionNotFound) {
+		t.Fatalf("cross-tenant session visible: %v", err)
+	}
+}

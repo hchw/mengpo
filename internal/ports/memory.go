@@ -88,3 +88,26 @@ type MemoryGovernanceMutationRepository interface {
 	LookupGovernanceMutation(ctx context.Context, tenantID, auditID, resourceID, actorType, actorID, action, requestID string) (MemoryGovernanceMutationResult, bool, error)
 	ApplyGovernanceMutation(ctx context.Context, tenantID string, mutation MemoryGovernanceMutationRecord) (MemoryGovernanceMutationResult, error)
 }
+
+// MemoryListRequest filters a memory list by scope and status for the console.
+type MemoryListRequest struct {
+	UserID    string
+	SessionID string
+	Statuses  []string
+	Page      int
+	PageSize  int
+}
+
+// MemoryListPage is one paginated page of memories.
+type MemoryListPage struct {
+	Items    []MemoryNodeRecord
+	Total    int64
+	Page     int
+	PageSize int
+}
+
+// MemoryListRepository lists memories by scope and status. It exists so the
+// console can show candidates, which the default-retrieval scope tree excludes.
+type MemoryListRepository interface {
+	ListMemories(ctx context.Context, tenantID string, request MemoryListRequest) (MemoryListPage, error)
+}

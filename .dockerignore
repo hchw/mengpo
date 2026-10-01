@@ -1,0 +1,18 @@
+# Keep build contexts small and deterministic: never ship local build output,
+# dependency trees, or VCS metadata into the images.
+.git
+.gitignore
+.github
+**/node_modules
+web/node_modules
+web/dist
+web/public/memory-tree.png
+.vscode
+.idea
+.pi
+*.log
+*.tmp
+.DS_Store
+
+# Local runtime artifacts.
+deploy/dev/*.local.yml

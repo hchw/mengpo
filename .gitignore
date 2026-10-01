@@ -8,3 +8,8 @@ coverage.out
 .pi
 openspec
 .codegraph
+
+# Dependency trees and large model artifacts are never committed.
+/node_modules/
+/web/node_modules/
+/models/

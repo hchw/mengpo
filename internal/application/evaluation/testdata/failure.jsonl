@@ -1,0 +1,3 @@
+{"version":"2024-01-01","kind":"failure"}
+{"id":"f1","tenant_id":"tenant-a","transcript":"build timed out due to lock","expected_confidence":"confirmed","expected_attribution":"direct"}
+{"id":"f2","tenant_id":"tenant-a","transcript":"maybe network flake","expected_confidence":"suspected","expected_attribution":"unknown"}

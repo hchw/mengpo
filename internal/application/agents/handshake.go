@@ -36,6 +36,7 @@ type Repository interface {
 	CreateAgent(ctx context.Context, agent auth.Agent, credential auth.AgentCredential) error
 	RotateCredential(ctx context.Context, agentID string, credential auth.AgentCredential) error
 	FindByCredentialHash(ctx context.Context, secretHash []byte) (auth.Agent, auth.AgentCredential, error)
+	DisableAgent(ctx context.Context, agentID string) error
 }
 
 type Service struct {
@@ -121,6 +122,19 @@ func (s *Service) RotateCredential(ctx context.Context, tenantContext tenants.Ac
 		return "", err
 	}
 	return secret, nil
+}
+
+// DisableAgent stops an Agent from handshaking and revokes its credentials. A
+// disabled Agent is rejected at handshake time by the agent status check.
+func (s *Service) DisableAgent(ctx context.Context, tenantContext tenants.ActiveTenantContext, agentID string) error {
+	if tenantContext.UserID == "" || tenantContext.Tenant.ID == "" ||
+		!slices.Contains(tenantContext.Permissions, PermissionManageAgent) || agentID == "" {
+		return ErrForbidden
+	}
+	if err := s.repository.DisableAgent(ctx, agentID); err != nil {
+		return err
+	}
+	return nil
 }
 
 type HandshakeRequest struct {

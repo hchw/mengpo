@@ -1,0 +1,3 @@
+{"version":"2024-01-01","kind":"consolidation"}
+{"id":"c1","tenant_id":"tenant-a","event_ids":["e1","e2"],"expected_type":"failure","expected_summary":"migration failed lock","expected_evidence_ids":["e1"],"should_promote":true}
+{"id":"c2","tenant_id":"tenant-a","event_ids":["e3"],"expected_type":"","expected_summary":"","expected_evidence_ids":[],"should_promote":false}
