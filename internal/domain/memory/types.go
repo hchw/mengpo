@@ -303,3 +303,8 @@ type Projection struct {
 	DegradedMode     string            `json:"degraded_mode,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`
 }
+
+// RelationMergedInto links a retired duplicate memory to the canonical memory
+// its evidence was merged into. It is distinct from supersede: merging unifies
+// evidence for the same fact; superseding replaces a stale version.
+const RelationMergedInto RelationType = "merged_into"

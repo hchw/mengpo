@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	ErrMemoryNotFound      = errors.New("memory node not found")
+	ErrMemoryNotFound      = ports.ErrMemoryNotFound
 	ErrVersionConflict     = errors.New("memory node version conflict")
 	ErrInvalidMemory       = errors.New("invalid memory node")
 	ErrMemoryScopeMismatch = errors.New("memory scope does not match owner")
@@ -384,4 +384,54 @@ func nullable(value string) any {
 		return nil
 	}
 	return value
+}
+
+// ListMemories lists memories by scope and status for the console, including
+// candidate-status nodes that the default-retrieval scope tree hides.
+func (r *MemoryRepository) ListMemories(ctx context.Context, tenantID string, request ports.MemoryListRequest) (ports.MemoryListPage, error) {
+	if request.UserID == "" || len(request.Statuses) == 0 {
+		return ports.MemoryListPage{}, ErrInvalidScopeTree
+	}
+	page := request.Page
+	if page < 1 {
+		page = 1
+	}
+	size := request.PageSize
+	if size < 1 {
+		size = 20
+	}
+	if size > 200 {
+		size = 200
+	}
+	scope := ` m.user_id = $1::uuid
+		AND ((m.scope_type = 'user-global' AND m.scope_id = $1::uuid)
+		  OR (m.scope_type = 'session' AND m.session_id = NULLIF($2, '')::uuid))
+		AND m.status = ANY($3::text[])
+		AND m.deleted_at IS NULL`
+	statuses := uuidArrayLiteral(request.Statuses)
+	result := ports.MemoryListPage{Page: page, PageSize: size}
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_nodes AS m WHERE`+scope, request.UserID, request.SessionID, statuses).Scan(&result.Total); err != nil {
+			return fmt.Errorf("count memories: %w", err)
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT `+memoryNodeColumnList("m")+` FROM memory_nodes AS m WHERE`+scope+`
+			ORDER BY m.updated_at DESC, m.id
+			LIMIT $4 OFFSET $5`, request.UserID, request.SessionID, statuses, size, (page-1)*size)
+		if err != nil {
+			return fmt.Errorf("list memories: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			node, err := scanMemory(rows)
+			if err != nil {
+				return fmt.Errorf("scan memory: %w", err)
+			}
+			result.Items = append(result.Items, node)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return ports.MemoryListPage{}, err
+	}
+	return result, nil
 }

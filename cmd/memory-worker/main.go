@@ -1,7 +1,15 @@
 package main
 
-import "log"
+import (
+	"context"
+	"os/signal"
+	"syscall"
+
+	"github.com/hchw/mengpo/internal/assembly"
+)
 
 func main() {
-	log.Print("memory worker scaffold; worker handlers are registered during application setup")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	assembly.RunMainWorker(ctx)
 }

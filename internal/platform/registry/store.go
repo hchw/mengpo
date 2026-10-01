@@ -28,6 +28,35 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// ActiveTenants lists tenants whose schema is enabled and whose registration is
+// active. Workers use this to poll only routable tenants instead of a
+// hard-coded list, and it therefore reflects provisioning/suspension changes
+// without a restart.
+func (s *Store) ActiveTenants(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.tenant_id::text
+		FROM public.tenant_schema_registry AS r
+		JOIN public.tenants AS t ON t.id = r.tenant_id
+		WHERE r.state = 'enabled' AND t.status = 'active'
+		ORDER BY r.tenant_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list active tenants: %w", err)
+	}
+	defer rows.Close()
+	var tenants []string
+	for rows.Next() {
+		var tenantID string
+		if err := rows.Scan(&tenantID); err != nil {
+			return nil, fmt.Errorf("scan active tenant: %w", err)
+		}
+		tenants = append(tenants, tenantID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active tenants: %w", err)
+	}
+	return tenants, nil
+}
+
 func ApplyPlatformMigrations(ctx context.Context, db *sql.DB) error {
 	return migrations.ApplyPlatform(ctx, db)
 }

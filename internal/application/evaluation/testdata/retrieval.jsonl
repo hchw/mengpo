@@ -1,0 +1,3 @@
+{"version":"2024-01-01","kind":"retrieval"}
+{"id":"r1","tenant_id":"tenant-a","query":"tenant routing","scope_type":"user-global","expected_memory_ids":["m1"],"forbidden_memory_ids":["m-evil"],"mode":"focus"}
+{"id":"r2","tenant_id":"tenant-a","query":"failed migration","scope_type":"session","expected_memory_ids":["m2","m3"],"forbidden_memory_ids":[],"mode":"diverge"}

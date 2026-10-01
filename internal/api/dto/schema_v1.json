@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mengpo.local/schemas/api-envelope-v1.json",
+  "title": "Mengpo API Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "request_id", "idempotency_key", "principal", "scope", "budget", "privacy", "payload"],
+  "properties": {
+    "version": {"const": "v1"},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
+    "principal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {"type": {"enum": ["user", "agent"]}, "id": {"type": "string", "minLength": 1, "maxLength": 128}}
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tenant_id", "user_id", "type"],
+      "properties": {
+        "tenant_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "user_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "type": {"enum": ["user-global", "session"]},
+        "session_id": {"type": "string", "maxLength": 128}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "session"}}}, "then": {"required": ["session_id"], "properties": {"session_id": {"minLength": 1}}}},
+        {"if": {"properties": {"type": {"const": "user-global"}}}, "then": {"properties": {"session_id": {"maxLength": 0}}}}
+      ]
+    },
+    "memory_hint": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["auto", "focus", "diverge"]},
+        "topics": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+        "memory_ids": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "allow_candidates": {"type": "boolean"}
+      }
+    },
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "candidates": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "ranking": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "injection_tokens": {"type": "integer", "minimum": 0, "maximum": 32768},
+        "relation_depth": {"type": "integer", "minimum": 0, "maximum": 16}
+      }
+    },
+    "privacy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["visibility"],
+      "properties": {
+        "visibility": {"enum": ["private", "tenant"]},
+        "allow_external_llm": {"type": "boolean"},
+        "sensitive_fields": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1}},
+        "include_raw_evidence": {"type": "boolean"}
+      }
+    },
+    "payload": true
+  }
+}

@@ -1,0 +1,113 @@
+package observation
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/hchw/mengpo/internal/domain/observation"
+	"github.com/hchw/mengpo/internal/ports"
+)
+
+type memoryRepository struct{ events []observation.Event }
+type notificationRecorder struct {
+	notifications []ports.JobNotification
+	err           error
+}
+
+func (n *notificationRecorder) Publish(_ context.Context, notification ports.JobNotification) error {
+	n.notifications = append(n.notifications, notification)
+	return n.err
+}
+func (n *notificationRecorder) Subscribe(context.Context) (<-chan ports.JobNotification, error) {
+	return nil, nil
+}
+
+func (r *memoryRepository) StoreObservation(_ context.Context, event observation.Event) (observation.Event, bool, error) {
+	r.events = append(r.events, event)
+	return event, true, nil
+}
+
+func TestGatewayAdaptsAllObservationSources(t *testing.T) {
+	repo := &memoryRepository{}
+	gateway := NewGateway(repo)
+	gateway.newID = func() (string, error) { return "00000000-0000-4000-8000-000000000001", nil }
+	input := Input{IdempotencyKey: "key", SessionID: "session", Payload: json.RawMessage(`{"ok":true}`),
+		OccurredAt: time.Now(), Visibility: observation.VisibilitySession,
+		Reliability: observation.ReliabilityHigh, RetentionClass: "standard"}
+	cases := []struct {
+		name       string
+		call       func(context.Context, Principal, Input) (observation.Event, bool, error)
+		wantSource observation.SourceType
+		wantType   string
+	}{
+		{"message", gateway.IngestMessage, observation.SourceUser, "message"},
+		{"tool", gateway.IngestTool, observation.SourceTool, "tool.result"},
+		{"workflow", gateway.IngestWorkflow, observation.SourceWorkflow, "workflow.event"},
+		{"code", gateway.IngestCode, observation.SourceAgent, "code.event"},
+		{"feedback", gateway.IngestFeedback, observation.SourceUser, "feedback"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Principal{TenantID: "trusted-tenant", SourceID: "trusted-source", AccessLevel: observation.Level1, AgentBound: true}
+			event, created, err := tc.call(context.Background(), p, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !created || event.SourceType != tc.wantSource || event.MessageType != tc.wantType || event.TenantID != p.TenantID {
+				t.Fatalf("unexpected adapted event: %#v created=%v", event, created)
+			}
+		})
+	}
+	if len(repo.events) != len(cases) {
+		t.Fatalf("persisted %d events, want %d", len(repo.events), len(cases))
+	}
+}
+
+func TestGatewayPreservesRawEventWhenNotificationFails(t *testing.T) {
+	repo := &memoryRepository{}
+	notifier := &notificationRecorder{err: errors.New("NATS unavailable")}
+	gateway := NewGateway(repo, notifier)
+	gateway.newID = func() (string, error) { return "event-id", nil }
+	input := Input{IdempotencyKey: "key", SessionID: "session", MessageType: "message", Payload: json.RawMessage(`{}`), OccurredAt: time.Now(), Visibility: observation.VisibilitySession, Reliability: observation.ReliabilityUnknown, RetentionClass: "standard"}
+	event, created, err := gateway.Ingest(context.Background(), Principal{TenantID: "tenant", SourceID: "user", SourceType: observation.SourceUser, AccessLevel: observation.Level0, DeploymentBound: true}, input)
+	if err != nil || !created || event.ID != "event-id" {
+		t.Fatalf("Ingest()=%#v,%v,%v", event, created, err)
+	}
+	if len(repo.events) != 1 {
+		t.Fatalf("durable repository received %d observations", len(repo.events))
+	}
+}
+
+func TestGatewayEnforcesProgressiveAccessLevels(t *testing.T) {
+	gateway := NewGateway(&memoryRepository{})
+	input := Input{IdempotencyKey: "key", MessageType: "tool.result", Payload: json.RawMessage(`{}`), OccurredAt: time.Now(), Visibility: observation.VisibilitySession, Reliability: observation.ReliabilityUnknown, RetentionClass: "standard", SessionID: "session"}
+	if _, _, err := gateway.Ingest(context.Background(), Principal{TenantID: "t", SourceID: "deployment", SourceType: observation.SourceGateway, AccessLevel: observation.Level0}, input); err != ErrInvalidPrincipal {
+		t.Fatalf("unbound Level 0 error=%v", err)
+	}
+	if _, _, err := gateway.Ingest(context.Background(), Principal{TenantID: "t", SourceID: "deployment", SourceType: observation.SourceGateway, AccessLevel: observation.Level0, DeploymentBound: true}, input); err != nil {
+		t.Fatalf("bound Level 0: %v", err)
+	}
+	if _, _, err := gateway.Ingest(context.Background(), Principal{TenantID: "t", SourceID: "agent", SourceType: observation.SourceAgent, AccessLevel: observation.Level1, AgentBound: true}, input); err != nil {
+		t.Fatalf("Level 1: %v", err)
+	}
+	deep := input
+	deep.Trace = observation.Trace{TaskID: "task", AttemptID: "attempt", ProjectionID: "projection", UsedMemoryIDs: []string{"memory"}, ToolResultID: "result", OutcomeID: "outcome"}
+	event, _, err := gateway.Ingest(context.Background(), Principal{TenantID: "t", SourceID: "agent", SourceType: observation.SourceAgent, AccessLevel: observation.Level2, AgentBound: true}, deep)
+	if err != nil {
+		t.Fatalf("Level 2: %v", err)
+	}
+	if event.Attribution.Level != observation.AttributionDirect {
+		t.Fatalf("Level 2 attribution=%s, want direct", event.Attribution.Level)
+	}
+}
+
+func TestGatewayRequiresTrustedTenantAndSource(t *testing.T) {
+	gateway := NewGateway(&memoryRepository{})
+	_, _, err := gateway.IngestMessage(context.Background(), Principal{SourceID: "source"}, Input{})
+	if err != ErrInvalidPrincipal {
+		t.Fatalf("error = %v, want %v", err, ErrInvalidPrincipal)
+	}
+}

@@ -1,0 +1,40 @@
+{
+  "total": 4,
+  "counts": [
+    {
+      "type": "helpful",
+      "count": 1
+    },
+    {
+      "type": "harmful",
+      "count": 1
+    },
+    {
+      "type": "corrected",
+      "count": 0
+    },
+    {
+      "type": "accepted",
+      "count": 1
+    },
+    {
+      "type": "ignored",
+      "count": 0
+    },
+    {
+      "type": "conflict",
+      "count": 1
+    },
+    {
+      "type": "expired",
+      "count": 0
+    }
+  ],
+  "rates": {
+    "conflict": 0.25,
+    "correction": 0,
+    "harmful": 0.25,
+    "helpful": 0.25,
+    "ignored": 0
+  }
+}
