@@ -403,8 +403,12 @@ func (r *MemoryRepository) ListMemories(ctx context.Context, tenantID string, re
 	if size > 200 {
 		size = 200
 	}
+	// User Global Memory and Session Memory are independent sets: a listing is
+	// either the user's background memory (no session) or one session's working
+	// memory (session present). A session must not inherit background nodes
+	// through this listing, and background listings must not leak session ones.
 	scope := ` m.user_id = $1::uuid
-		AND ((m.scope_type = 'user-global' AND m.scope_id = $1::uuid)
+		AND ((m.scope_type = 'user-global' AND m.scope_id = $1::uuid AND NULLIF($2, '') IS NULL)
 		  OR (m.scope_type = 'session' AND m.session_id = NULLIF($2, '')::uuid))
 		AND m.status = ANY($3::text[])
 		AND m.deleted_at IS NULL`
@@ -465,13 +469,39 @@ LIMIT $1`, limit)
 	return result, err
 }
 
-// ListRecentCandidates returns the most recently updated candidates.
+// ListRecentCandidates returns the tenant's most recently updated candidates
+// regardless of owner. Maintenance scans run per tenant, so this does not take
+// a user filter and must not reuse the user-scoped ListMemories.
 func (r *MemoryRepository) ListRecentCandidates(ctx context.Context, tenantID string, limit int) ([]ports.MemoryNodeRecord, error) {
-	page, err := r.ListMemories(ctx, tenantID, ports.MemoryListRequest{Statuses: []string{"candidate"}, Page: 1, PageSize: limit})
+	if tenantID == "" || limit <= 0 {
+		return nil, ErrInvalidScopeTree
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	result := make([]ports.MemoryNodeRecord, 0, limit)
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT `+memoryNodeColumns+` FROM memory_nodes
+			WHERE status = 'candidate' AND deleted_at IS NULL
+			ORDER BY updated_at DESC, id
+			LIMIT $1`, limit)
+		if err != nil {
+			return fmt.Errorf("list recent candidates: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			node, err := scanMemory(rows)
+			if err != nil {
+				return fmt.Errorf("scan candidate: %w", err)
+			}
+			result = append(result, node)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	return page.Items, nil
+	return result, nil
 }
 
 var (
