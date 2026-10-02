@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/hchw/mengpo/internal/adapters/embedding"
 	"github.com/hchw/mengpo/internal/adapters/postgres"
 	"github.com/hchw/mengpo/internal/api/httpapi"
 	"github.com/hchw/mengpo/internal/application/agentaccess"
@@ -51,7 +53,18 @@ func BuildUseCases(cfg config.Config, db *sql.DB) (httpapi.UseCases, error) {
 	quarantine := postgres.NewQuarantineRepository(db)
 
 	gateway := observation.NewGateway(observations)
-	recallService := recall.NewService(search, relations, memories, embeddings)
+	// The query vector channel needs the same embedder identity the worker used
+	// to store vectors; without an enabled provider recall degrades to
+	// structured plus full-text instead of failing.
+	var embedder ports.Embedder
+	if cfg.Providers.Embedding.Enabled {
+		local, err := embedding.NewLlamaCPP(cfg.Providers.Embedding)
+		if err != nil {
+			return nil, fmt.Errorf("configure embedding provider: %w", err)
+		}
+		embedder = local
+	}
+	recallService := recall.NewService(search, relations, memories, embeddings, embedder)
 	pipeline := projection.NewPipeline(projection.PipelinePolicy{
 		Timeout:                2 * time.Second,
 		CacheTTL:               30 * time.Second,

@@ -38,9 +38,12 @@ type TenantSource interface {
 	ActiveTenants(ctx context.Context) ([]string, error)
 }
 
-// EmbeddingRunner drains one tenant's embedding jobs.
+// EmbeddingRunner drains one tenant's embedding jobs. RebuildForModel
+// enqueues embedding jobs for memories whose stored embedding identity
+// differs from the current embedder (including never-embedded pending ones).
 type EmbeddingRunner interface {
 	ProcessBatch(ctx context.Context, tenantID string) (int, error)
+	RebuildForModel(ctx context.Context, tenantID string) (int, error)
 }
 
 // WorkerOptions inject the pieces a worker process needs. Optional fields
@@ -246,6 +249,22 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("resolve active tenants: %w", err)
 	}
 	w.logger.Info("memory worker starting", slog.Int("tenants", len(tenants)))
+
+	// Memories created before the embedding pipeline sees them (or under a
+	// different embedder identity) carry no embedding job; rebuild is
+	// idempotent and only queues memories whose identity differs.
+	if w.options.Embedding != nil {
+		for _, tenantID := range tenants {
+			enqueued, rebuildErr := w.options.Embedding.RebuildForModel(ctx, tenantID)
+			if rebuildErr != nil {
+				w.logger.Error("enqueue embedding rebuild", slog.String("tenant", tenantID), slog.String("error", rebuildErr.Error()))
+				continue
+			}
+			if enqueued > 0 {
+				w.logger.Info("enqueued embedding rebuild", slog.String("tenant", tenantID), slog.Int("memories", enqueued))
+			}
+		}
+	}
 
 	if w.options.Scheduler != nil {
 		if err := w.options.Scheduler.Start(ctx); err != nil {

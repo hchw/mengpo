@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/hchw/mengpo/internal/platform/tenantdb"
 	"github.com/hchw/mengpo/internal/ports"
@@ -18,6 +19,8 @@ const (
 	MaxSearchPageSize     = 100
 	MaxSearchPage         = 100000
 	MaxSearchQueryLength  = 4096
+	MaxSearchTerms        = 32
+	MaxSearchTermRunes    = 64
 )
 
 type SearchRepository struct {
@@ -28,8 +31,53 @@ func NewSearchRepository(router *tenantdb.Router) *SearchRepository {
 	return &SearchRepository{router: router}
 }
 
+// term is one retrieval keyword of a query. Latin terms match through the
+// full-text lexeme channel; CJK terms cannot be lexemized by the 'simple'
+// parser (it folds a whole CJK run into one lexeme), so they match through
+// substring containment instead.
+type term struct {
+	text string
+	cjk  bool
+}
+
+// splitSearchTerms tokenizes a query into retrieval terms: runs of letters and
+// digits, trimmed of punctuation, de-duplicated, capped to keep the generated
+// predicate bounded.
+func splitSearchTerms(query string) []term {
+	seen := make(map[string]bool)
+	terms := make([]term, 0, 8)
+	for _, field := range strings.FieldsFunc(query, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		runes := []rune(field)
+		if len(runes) > MaxSearchTermRunes {
+			runes = runes[:MaxSearchTermRunes]
+		}
+		text := string(runes)
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		terms = append(terms, term{text: text, cjk: containsCJK(text)})
+		if len(terms) == MaxSearchTerms {
+			break
+		}
+	}
+	return terms
+}
+
+func containsCJK(text string) bool {
+	for _, r := range text {
+		if unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r) {
+			return true
+		}
+	}
+	return false
+}
+
 // Search always restricts results to the user's tenant-local User Global Memory
 // and, when supplied, their current Session Memory before applying query terms.
+// A query with several terms matches a memory through ANY term (OR), ranked by
+// how many terms hit; CJK terms match through substring containment because
+// the 'simple' parser cannot lexemize them.
 func (r *SearchRepository) Search(ctx context.Context, tenantID, userID, sessionID string, request ports.MemorySearchRequest) (ports.MemorySearchPage, error) {
 	if tenantID == "" || userID == "" || len(request.Query) > MaxSearchQueryLength || request.Page < 0 || request.Page > MaxSearchPage || request.PageSize < 0 {
 		return ports.MemorySearchPage{}, ErrInvalidSearchPage
@@ -45,32 +93,69 @@ func (r *SearchRepository) Search(ctx context.Context, tenantID, userID, session
 	}
 	offset := int64(request.Page-1) * int64(request.PageSize)
 	query := strings.TrimSpace(request.Query)
+	terms := splitSearchTerms(query)
 	var result ports.MemorySearchPage
 	result.Page, result.PageSize = request.Page, request.PageSize
 
+	// matchPredicate builds the per-term match SQL and its bind values. Each
+	// term contributes one channel: full-text lexemes for Latin terms,
+	// substring containment for CJK terms. Placeholders start at $4 ($1-$3
+	// are user/session/memory-type filters).
+	matchParts := make([]string, 0, len(terms))
+	scoreParts := make([]string, 0, len(terms))
+	args := []any{userID, sessionID, request.MemoryType}
+	if len(terms) == 0 && query != "" {
+		// No letter/digit terms (pure punctuation or symbols): fall back to
+		// exact substring containment of the raw query.
+		matchParts = append(matchParts, fmt.Sprintf("position($%d in coalesce(content_text, '')) > 0", len(args)+1))
+		scoreParts = append(scoreParts, fmt.Sprintf("(CASE WHEN position($%d in coalesce(content_text, '')) > 0 THEN 0.6::real ELSE 0 END)", len(args)))
+		args = append(args, query)
+	}
+	for _, t := range terms {
+		if t.cjk {
+			matchParts = append(matchParts, fmt.Sprintf("position($%d in coalesce(content_text, '')) > 0", len(args)+1))
+			scoreParts = append(scoreParts, fmt.Sprintf("(CASE WHEN position($%d in coalesce(content_text, '')) > 0 THEN 0.6::real ELSE 0 END)", len(args)))
+			args = append(args, t.text)
+			continue
+		}
+		// Latin terms match lexemes with a prefix so a query word also hits its
+		// inflections and compounds ("tailwind" -> "tailwindcss"). The term is
+		// restricted to letters and digits, so appending the tsquery prefix
+		// operator cannot inject query syntax.
+		matchParts = append(matchParts, fmt.Sprintf("to_tsvector('simple', coalesce(content_text, '')) @@ to_tsquery('simple', $%d)", len(args)+1))
+		scoreParts = append(scoreParts, fmt.Sprintf("(CASE WHEN to_tsvector('simple', coalesce(content_text, '')) @@ to_tsquery('simple', $%d) THEN 1.0::real ELSE 0 END)", len(args)))
+		args = append(args, t.text+":*")
+	}
+	matchSQL := ""
+	if len(matchParts) > 0 {
+		matchSQL = " AND (" + strings.Join(matchParts, " OR ") + ")"
+	}
+	scoreSQL := "0::real"
+	if len(scoreParts) > 0 {
+		scoreSQL = "(" + strings.Join(scoreParts, " + ") + ")"
+	}
+
+	filters := `user_id = $1::uuid
+		AND ((scope_type = 'user-global' AND scope_id = $1::uuid)
+			OR (scope_type = 'session' AND session_id = NULLIF($2, '')::uuid))
+		AND ($2 = '' OR EXISTS (SELECT 1 FROM sessions AS requested_session WHERE requested_session.id = NULLIF($2, '')::uuid AND requested_session.user_id = $1::uuid))
+		AND status IN ('active', 'stable')
+		AND default_retrieval = true
+		AND deleted_at IS NULL
+		AND (expires_at IS NULL OR expires_at > now())
+		AND ($3 = '' OR memory_type = $3)` + matchSQL
+
 	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
-		const filters = `user_id = $1::uuid
-			AND ((scope_type = 'user-global' AND scope_id = $1::uuid)
-				OR (scope_type = 'session' AND session_id = NULLIF($2, '')::uuid))
-AND ($2 = '' OR EXISTS (SELECT 1 FROM sessions AS requested_session WHERE requested_session.id = NULLIF($2, '')::uuid AND requested_session.user_id = $1::uuid))
-			AND status IN ('active', 'stable')
-			AND default_retrieval = true
-			AND deleted_at IS NULL
-			AND (expires_at IS NULL OR expires_at > now())
-			AND ($4 = '' OR memory_type = $4)
-			AND ($3 = '' OR to_tsvector('simple', coalesce(content_text, '')) @@ plainto_tsquery('simple', $3))`
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_nodes WHERE `+filters,
-			userID, sessionID, query, request.MemoryType).Scan(&result.Total); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_nodes WHERE `+filters, args...).
+			Scan(&result.Total); err != nil {
 			return fmt.Errorf("count memory search results: %w", err)
 		}
-		selectQuery := `SELECT ` + memoryNodeColumns + `,
-			CASE WHEN $3 = '' THEN 0::real
-			ELSE ts_rank_cd(to_tsvector('simple', coalesce(content_text, '')), plainto_tsquery('simple', $3))
-			END AS score
+		selectQuery := `SELECT ` + memoryNodeColumns + `, ` + scoreSQL + ` AS score
 			FROM memory_nodes WHERE ` + filters + `
 			ORDER BY score DESC, confidence DESC, updated_at DESC, id
-			LIMIT $5 OFFSET $6`
-		rows, err := tx.QueryContext(ctx, selectQuery, userID, sessionID, query, request.MemoryType, request.PageSize, offset)
+			LIMIT $` + fmt.Sprint(len(args)+1) + ` OFFSET $` + fmt.Sprint(len(args)+2)
+		selectArgs := append(append([]any{}, args...), request.PageSize, offset)
+		rows, err := tx.QueryContext(ctx, selectQuery, selectArgs...)
 		if err != nil {
 			return fmt.Errorf("search memory nodes: %w", err)
 		}
@@ -94,7 +179,6 @@ AND ($2 = '' OR EXISTS (SELECT 1 FROM sessions AS requested_session WHERE reques
 	}
 	return result, nil
 }
-
 func scanMemoryWithScore(row rowScanner) (ports.MemoryNodeRecord, float64, error) {
 	var node ports.MemoryNodeRecord
 	var sessionID, parentID sql.NullString

@@ -58,6 +58,10 @@ func (c *countingEmbedding) ProcessBatch(context.Context, string) (int, error) {
 	return 0, nil
 }
 
+func (c *countingEmbedding) RebuildForModel(context.Context, string) (int, error) {
+	return 0, nil
+}
+
 // TestWorkerRunsAndStops verifies the worker starts its embedding loop, keeps
 // polling the durable outbox, and shuts down cleanly when the context is
 // cancelled.

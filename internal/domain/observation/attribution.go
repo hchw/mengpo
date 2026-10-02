@@ -35,6 +35,12 @@ type Attribution struct {
 }
 
 // AssessAttribution measures linkage completeness without inferring missing edges.
+//
+// Direct attribution requires a session or conversation, one branch reference
+// (parent event, task, attempt, or projection), and both a tool result and an
+// outcome identifier on the same event; the remaining trace fields stay listed
+// as limitations of the non-direct levels but are not fabricated requirements
+// for direct attribution.
 func AssessAttribution(sessionID, conversationID, parentEventID string, trace Trace) Attribution {
 	missing := make([]string, 0, 6)
 	for _, field := range []struct{ name, value string }{
@@ -45,11 +51,14 @@ func AssessAttribution(sessionID, conversationID, parentEventID string, trace Tr
 			missing = append(missing, field.name)
 		}
 	}
-	if len(missing) == 0 {
+	hasSession := strings.TrimSpace(sessionID) != "" || strings.TrimSpace(conversationID) != ""
+	hasBranch := strings.TrimSpace(parentEventID) != "" || trace.TaskID != "" || trace.AttemptID != "" || trace.ProjectionID != ""
+	hasOutcomePair := strings.TrimSpace(trace.ToolResultID) != "" && strings.TrimSpace(trace.OutcomeID) != ""
+	if hasSession && hasBranch && hasOutcomePair {
 		return Attribution{Level: AttributionDirect}
 	}
-	if strings.TrimSpace(sessionID) != "" || strings.TrimSpace(conversationID) != "" {
-		if strings.TrimSpace(parentEventID) != "" || trace.TaskID != "" || trace.AttemptID != "" || trace.ProjectionID != "" {
+	if hasSession {
+		if hasBranch || strings.TrimSpace(trace.ToolResultID) != "" || strings.TrimSpace(trace.OutcomeID) != "" || strings.TrimSpace(trace.FeedbackID) != "" {
 			return Attribution{Level: AttributionCorrelated, Limitations: missing}
 		}
 		return Attribution{Level: AttributionInferred, Limitations: missing}

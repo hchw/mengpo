@@ -12,6 +12,13 @@ import (
 const (
 	DefaultChannelLimit  = 20
 	DefaultRelationLimit = 20
+
+	// DefaultVectorSimilarityFloor drops loosely related embeddings from the
+	// semantic channel. The local embedding eligibility sample puts paraphrase
+	// similarity above ~0.7 and unrelated concepts below ~0.3, so 0.55 keeps
+	// genuinely semantic neighbours without flooding recall with every stored
+	// vector.
+	DefaultVectorSimilarityFloor = 0.55
 )
 
 // RecallRequest describes one candidate recall pass. Query text drives the
@@ -109,10 +116,18 @@ func (s *Service) RecallWithMeta(ctx context.Context, tenantID, userID, sessionI
 			if err != nil {
 				meta.Degraded = append(meta.Degraded, "vector-index-unavailable: "+err.Error())
 			} else {
+				added := 0
 				for _, result := range results {
-					pool.add([]ports.MemorySearchResult{{Node: result.Node, Score: 1 - result.Distance}}, ports.RecallChannelVector)
+					similarity := 1 - result.Distance
+					if similarity < DefaultVectorSimilarityFloor {
+						continue
+					}
+					pool.add([]ports.MemorySearchResult{{Node: result.Node, Score: similarity}}, ports.RecallChannelVector)
+					added++
 				}
-				meta.ChannelsUsed = append(meta.ChannelsUsed, ports.RecallChannelVector)
+				if added > 0 {
+					meta.ChannelsUsed = append(meta.ChannelsUsed, ports.RecallChannelVector)
+				}
 			}
 		}
 	}
