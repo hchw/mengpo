@@ -158,3 +158,65 @@ func TestSearchScopesFiltersPaginatesAndUsesFullTextIndex(t *testing.T) {
 		t.Fatalf("full-text index EXPLAIN: %v", err)
 	}
 }
+
+func TestSearchMatchesAnyTermIncludingCJK(t *testing.T) {
+	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set MEMORY_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open PostgreSQL: %v", err)
+	}
+	db.SetMaxOpenConns(8)
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("ping PostgreSQL: %v", err)
+	}
+	if err := registry.ApplyPlatformMigrations(ctx, db); err != nil {
+		t.Fatalf("apply platform migrations: %v", err)
+	}
+	store := registry.NewStore(db)
+	tenant := createMigratedTenant(t, ctx, db, store, "search cjk tenant")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id = $1`, tenant.ID)
+	})
+	router := tenantdb.NewRouter(db, store)
+	repo := NewMemoryRepository(router)
+	search := NewSearchRepository(router)
+	userID := "00000000-0000-4000-8000-000000000001"
+	pgvectorNode := ports.MemoryNodeRecord{ID: "00000000-0000-4000-8000-000000000501", IdempotencyKey: "search-cjk:pgvector", UserID: userID, ScopeType: "user-global", ScopeID: userID, MemoryType: "preference", Status: "active", Confidence: 0.9, ContentText: "本地开发一律用 pgvector 存向量,不用 faiss", Content: json.RawMessage(`{"text":"本地开发一律用 pgvector 存向量,不用 faiss"}`), DefaultRetrieval: true}
+	redisNode := ports.MemoryNodeRecord{ID: "00000000-0000-4000-8000-000000000502", IdempotencyKey: "search-cjk:redis", UserID: userID, ScopeType: "user-global", ScopeID: userID, MemoryType: "preference", Status: "active", Confidence: 0.9, ContentText: "redis 只做缓存和限流", Content: json.RawMessage(`{"text":"redis 只做缓存和限流"}`), DefaultRetrieval: true}
+	tailwindNode := ports.MemoryNodeRecord{ID: "00000000-0000-4000-8000-000000000503", IdempotencyKey: "search-cjk:tailwind", UserID: userID, ScopeType: "user-global", ScopeID: userID, MemoryType: "preference", Status: "active", Confidence: 0.9, ContentText: "前端样式统一用 tailwindcss v4 的 @theme 令牌", Content: json.RawMessage(`{"text":"前端样式统一用 tailwindcss v4 的 @theme 令牌"}`), DefaultRetrieval: true}
+	for _, node := range []ports.MemoryNodeRecord{pgvectorNode, redisNode, tailwindNode} {
+		if _, err := repo.Create(ctx, tenant.ID, node); err != nil {
+			t.Fatalf("create fixture %s: %v", node.ID, err)
+		}
+	}
+	cases := []struct {
+		name  string
+		query string
+		want  int64
+	}{
+		{"cjk substring matches", "本地开发", 1},
+		{"cjk contiguous run matches", "存向量", 1},
+		{"english partial prompt still matches", "which database should I use, pgvector or faiss?", 1},
+		{"multi-term query matches both memories", "pgvector redis", 2},
+		{"english prefix matches compound", "tailwind", 1},
+		{"unrelated terms match nothing", "kubernetes auditing", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			page, err := search.Search(ctx, tenant.ID, userID, "", ports.MemorySearchRequest{Query: tc.query, Page: 1, PageSize: 20})
+			if err != nil {
+				t.Fatalf("Search(%q) error = %v", tc.query, err)
+			}
+			if page.Total != tc.want {
+				t.Fatalf("Search(%q) total = %d, want %d", tc.query, page.Total, tc.want)
+			}
+		})
+	}
+}

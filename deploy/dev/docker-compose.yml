@@ -49,6 +49,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
+      target: runtime-llama
       args:
         SERVICE: memory-server
     environment:
@@ -56,6 +57,8 @@ services:
       MEMORY_NATS_URL: nats://nats:4222
       MEMORY_REDIS_URL: redis://redis:6379/0
       MEMORY_HTTP_ADDR: ":8080"
+      MEMORY_EMBEDDING_ENABLED: "true"
+      MEMORY_EMBEDDING_BINARY: llama-embedding
       MEMORY_EMBEDDING_ARTIFACT: /app/models/all-MiniLM-L6-v2-Q8_0.gguf
       MEMORY_QUEUE_ADAPTER: nats-core
       MEMORY_CONFIG_MASTER_KEY: ${MEMORY_CONFIG_MASTER_KEY:-mengpo-dev-master-key--32bytes--}
@@ -74,12 +77,15 @@ services:
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
+      target: runtime-llama
       args:
         SERVICE: memory-worker
     environment:
       MEMORY_DATABASE_URL: postgres://mengpo:mengpo@postgres:5432/mengpo?sslmode=disable
       MEMORY_NATS_URL: nats://nats:4222
       MEMORY_REDIS_URL: redis://redis:6379/0
+      MEMORY_EMBEDDING_ENABLED: "true"
+      MEMORY_EMBEDDING_BINARY: llama-embedding
       MEMORY_EMBEDDING_ARTIFACT: /app/models/all-MiniLM-L6-v2-Q8_0.gguf
       MEMORY_QUEUE_ADAPTER: nats-core
       MEMORY_SCHEDULER_ADAPTER: internal

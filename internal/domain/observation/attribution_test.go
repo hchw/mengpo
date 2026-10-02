@@ -13,6 +13,8 @@ func TestAttributionLevelsReflectAvailableLinkage(t *testing.T) {
 		level                               AttributionLevel
 	}{
 		{"deep direct", "s", "", "", complete, AttributionDirect},
+		{"partial trace direct", "s", "", "", Trace{TaskID: "task", ToolResultID: "tool-result", OutcomeID: "outcome"}, AttributionDirect},
+		{"parent link direct", "s", "", "parent", Trace{ToolResultID: "tool-result", OutcomeID: "outcome"}, AttributionDirect},
 		{"trace correlated", "s", "", "", Trace{TaskID: "task"}, AttributionCorrelated},
 		{"session inferred", "s", "", "", Trace{}, AttributionInferred},
 		{"conversation inferred", "", "c", "", Trace{}, AttributionInferred},

@@ -102,3 +102,26 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestVectorChannelDropsLooseSimilarity(t *testing.T) {
+	search := &fakeSearchRepository{byQuery: map[string][]ports.MemorySearchResult{"query": {}}}
+	embedder := successEmbedder{metadata: ports.EmbeddingMetadata{ModelID: "model", Artifact: "model.gguf", Version: "v1", Dimensions: 4}}
+	vectors := &fakeEmbeddingRepository{similar: map[string][]ports.VectorSearchResult{"v1": {
+		{Node: node("close", "fact", "", "close neighbour"), Distance: 1 - DefaultVectorSimilarityFloor - 0.05},
+		{Node: node("loose", "fact", "", "loose neighbour"), Distance: 1 - DefaultVectorSimilarityFloor + 0.05},
+	}}}
+	service := NewService(search, &fakeRelationRepository{}, &fakeMemoryRepository{}, vectors, embedder)
+	candidates, meta, err := service.RecallWithMeta(context.Background(), "tenant", "user", "session", RecallRequest{Query: "query"})
+	if err != nil {
+		t.Fatalf("RecallWithMeta(): %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Node.ID != "close" {
+		t.Fatalf("candidates=%#v, want only the close neighbour", candidates)
+	}
+	if !containsString(meta.ChannelsUsed, ports.RecallChannelVector) {
+		t.Fatalf("channels=%v, want vector channel recorded", meta.ChannelsUsed)
+	}
+	if len(meta.Degraded) != 0 {
+		t.Fatalf("degraded=%v, want none", meta.Degraded)
+	}
+}
