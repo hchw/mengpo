@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,13 @@ func (f *fakeNormalizedStore) MarkRawEventProcessed(context.Context, string, str
 type fakeCandidateWriter struct{ records []ports.CandidateMemoryRecord }
 
 func (f *fakeCandidateWriter) PersistCandidates(_ context.Context, _ string, records []ports.CandidateMemoryRecord) (int, error) {
+	f.records = append(f.records, records...)
+	return len(records), nil
+}
+
+type fakeWorkingMemoryWriter struct{ records []ports.WorkingMemoryRecord }
+
+func (f *fakeWorkingMemoryWriter) PersistWorkingMemory(_ context.Context, _ string, records []ports.WorkingMemoryRecord) (int, error) {
 	f.records = append(f.records, records...)
 	return len(records), nil
 }
@@ -96,6 +104,7 @@ func dispatcherFor(t *testing.T, event observation.Event, analyst *countingAnaly
 		Normalized:           normalized,
 		Analysis:             analysis.New(providers),
 		Candidates:           candidates,
+		WorkingMemory:        &fakeWorkingMemoryWriter{},
 		SessionOwner:         fakeSessionOwner{owner: "user-1"},
 		Runs:                 runs,
 		SchemaVersion:        "schema-v1",
@@ -306,6 +315,117 @@ func TestExplicitMemoryIntentIsHandledImmediately(t *testing.T) {
 	}
 	if len(runs.started) != 1 || runs.started[0].Trigger != ports.TriggerExplicit || runs.started[0].TaskType != observation.TaskConsolidation {
 		t.Fatalf("immediate run = %#v", runs.started)
+	}
+}
+
+func TestSessionCompactionExtractionProducesActiveWorkingMemory(t *testing.T) {
+	event := observation.Event{
+		ID:          "77777777-7777-4777-8777-777777777777",
+		TenantID:    "tenant-a",
+		SessionID:   "88888888-8888-4888-8888-888888888888",
+		SourceType:  observation.SourceWorkflow,
+		MessageType: "context.compaction",
+		Payload:     json.RawMessage(`{"context_summary":true}`),
+		OccurredAt:  time.Now().UTC(),
+	}
+	analyst := &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
+		CandidateID:      "compact-1",
+		EvidenceEventIDs: []string{event.ID},
+		ScopeType:        "session",
+		ScopeID:          event.SessionID,
+		Content:          json.RawMessage(`{"text":"the build needs GOPROXY set"}`),
+		Confidence:       0.6,
+	}}}}
+	candidates := &fakeCandidateWriter{}
+	runs := &fakeRunStore{}
+	dispatcher := dispatcherFor(t, event, analyst, candidates, &fakeNormalizedStore{}, runs)
+
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{
+		ID: "job-compaction", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID,
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if analyst.calls != 1 {
+		t.Fatalf("compaction boundary called the model %d times, want 1", analyst.calls)
+	}
+	working := dispatcher.WorkingMemory.(*fakeWorkingMemoryWriter)
+	if len(working.records) != 1 {
+		t.Fatalf("session working memory = %d, want 1", len(working.records))
+	}
+	if len(candidates.records) != 0 {
+		t.Fatalf("session working memory went to the candidate gate: %d records", len(candidates.records))
+	}
+	record := working.records[0]
+	if record.Node.ScopeType != "session" || record.Node.SessionID != event.SessionID {
+		t.Fatalf("session working memory scope = %+v", record.Node)
+	}
+	// Session working memory is queried during the same session, so the
+	// candidate gate must not hold it back; only background memory is gated.
+	if record.Node.Status != "active" || !record.Node.DefaultRetrieval {
+		t.Fatalf("session working memory must be active and retrievable, got %+v", record.Node)
+	}
+	if len(runs.started) != 1 || runs.started[0].TaskType != observation.TaskConsolidation || runs.started[0].Trigger != ports.TriggerEvent {
+		t.Fatalf("compaction run = %#v", runs.started)
+	}
+}
+
+func TestCandidateStatusSeparatesWorkingAndBackgroundMemory(t *testing.T) {
+	if status, retrievable := candidateStatus("session"); status != "active" || !retrievable {
+		t.Fatalf("session scope = (%q, %v), want (active, true)", status, retrievable)
+	}
+	if status, retrievable := candidateStatus("user-global"); status != "candidate" || retrievable {
+		t.Fatalf("user-global scope = (%q, %v), want (candidate, false)", status, retrievable)
+	}
+}
+
+func TestDeterministicExtractionClosesLoopWithoutLLM(t *testing.T) {
+	event := observation.Event{
+		ID:          "99999999-9999-4999-8999-999999999999",
+		TenantID:    "tenant-a",
+		SessionID:   "a9a9a9a9-a9a9-49a9-89a9-a9a9a9a9a9a9",
+		SourceType:  observation.SourceWorkflow,
+		MessageType: "context.compaction",
+		Payload:     json.RawMessage(`{"context_summary":true,"summary":"the build needs GOPROXY"}`),
+		OccurredAt:  time.Now().UTC(),
+	}
+	candidates := &fakeCandidateWriter{}
+	runs := &fakeRunStore{}
+	// No Memory LLM: the deterministic baseline must still produce memory even
+	// though the configured analyst proposes nothing.
+	dispatcher := &JobDispatcher{
+		Observations:         fakeObservationReader{event: event},
+		Normalized:           &fakeNormalizedStore{},
+		Analysis:             analysis.New(analysis.Providers{Analyst: analysis.RuleFallback{}}),
+		Candidates:           candidates,
+		WorkingMemory:        &fakeWorkingMemoryWriter{},
+		SessionOwner:         fakeSessionOwner{owner: "user-1"},
+		Runs:                 runs,
+		SchemaVersion:        "schema-v1",
+		NormalizationVersion: "normalize-v1",
+		PromptVersion:        "rule-v1",
+		NewID:                newUUID,
+	}
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{
+		ID: "job-deterministic", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID,
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(candidates.records) != 0 {
+		t.Fatalf("deterministic extraction went to the candidate gate: %d records", len(candidates.records))
+	}
+	working := dispatcher.WorkingMemory.(*fakeWorkingMemoryWriter)
+	if len(working.records) != 1 {
+		t.Fatalf("deterministic working memory = %d, want 1", len(working.records))
+	}
+	record := working.records[0]
+	if record.Node.ScopeType != "session" || record.Node.SessionID != event.SessionID {
+		t.Fatalf("deterministic scope = %+v", record.Node)
+	}
+	if record.Node.Status != "active" || !record.Node.DefaultRetrieval {
+		t.Fatalf("deterministic session memory must be active, got %+v", record.Node)
+	}
+	if !strings.Contains(record.Node.ContentText, "GOPROXY") {
+		t.Fatalf("deterministic content text = %q", record.Node.ContentText)
 	}
 }
 

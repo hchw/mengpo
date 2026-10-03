@@ -59,6 +59,18 @@ func TestAnalysisTaskGating(t *testing.T) {
 			wantTask: TaskConsolidation,
 			want:     true,
 		},
+		{
+			name:     "context compaction triggers consolidation",
+			event:    analysisEvent("context.compaction", `{"compaction":true}`, SourceWorkflow),
+			wantTask: TaskConsolidation,
+			want:     true,
+		},
+		{
+			name:     "branch summary triggers consolidation",
+			event:    analysisEvent("context.branch_summary", `{}`, SourceWorkflow),
+			wantTask: TaskConsolidation,
+			want:     true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,5 +86,14 @@ func TestHasMemoryIntentIgnoresNonUserSources(t *testing.T) {
 	event := analysisEvent("message", `{"remember":true}`, SourceTool)
 	if HasMemoryIntent(event) {
 		t.Fatal("non-user sources must not carry explicit memory intent")
+	}
+}
+
+func TestIsSessionBoundaryIsSourceAgnostic(t *testing.T) {
+	if !IsSessionBoundary(analysisEvent("context.compaction", `{}`, SourceWorkflow)) {
+		t.Fatal("compaction must be a session boundary regardless of source")
+	}
+	if IsSessionBoundary(analysisEvent("turn.outcome", `{}`, SourceAgent)) {
+		t.Fatal("ordinary turn outcomes are not session boundaries")
 	}
 }

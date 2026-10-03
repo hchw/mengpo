@@ -101,6 +101,7 @@ func TestAnalystEndToEnd(t *testing.T) {
 		Normalized:           postgres.NewNormalizedEventRepository(router),
 		AnalysisReader:       postgres.NewNormalizedEventRepository(router),
 		Candidates:           postgres.NewCandidateRepository(router),
+		WorkingMemory:        postgres.NewWorkingMemoryRepository(router),
 		SessionOwner:         postgres.NewSessionRepository(router),
 		Runs:                 postgres.NewAnalystRunRepository(router),
 		Analysis:             analysis.NewWithPrivacy(analysis.Providers{Analyst: analysis.ResilientService{Primary: adapter, Fallback: analysis.RuleFallback{}}}, analysis.PrivacyPolicy{}),

@@ -42,8 +42,12 @@ type JobDispatcher struct {
 	Analysis       *analysis.Service
 	AnalysisReader ports.NormalizedEventReader
 	Candidates     ports.CandidateMemoryWriter
-	SessionOwner   ports.SessionScopeRepository
-	Runs           ports.AnalysisRunStore
+	// WorkingMemory persists session-scoped working memory, which is active on
+	// arrival. The user-global background tree stays on Candidates and is
+	// promoted only by governance.
+	WorkingMemory ports.WorkingMemoryWriter
+	SessionOwner  ports.SessionScopeRepository
+	Runs          ports.AnalysisRunStore
 	// Cache reuses an identical consolidation result instead of calling the
 	// model again. It is keyed by tenant, prompt version, schema and inputs.
 	Cache    ports.TenantCache
@@ -117,7 +121,7 @@ func (d *JobDispatcher) normalizeEvent(ctx context.Context, job ports.OutboxJob)
 			TaskType:      taskType,
 			PromptVersion: promptVersion,
 			SchemaVersion: d.SchemaVersion,
-			Events:        []ports.AnalysisEvent{{EventID: event.ID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, Payload: event.Payload}},
+			Events:        []ports.AnalysisEvent{{EventID: event.ID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, MessageType: event.MessageType, Payload: event.Payload}},
 		})
 		if err != nil {
 			d.finishRun(ctx, job.TenantID, runID, taskType, time.Since(started), ports.AnalysisRunUpdate{
@@ -127,6 +131,7 @@ func (d *JobDispatcher) normalizeEvent(ctx context.Context, job ports.OutboxJob)
 			})
 			return err
 		}
+		d.captureDeterministicCandidate(event, &analysisResult)
 		d.finishRun(ctx, job.TenantID, runID, taskType, time.Since(started), runUpdateFromResult(analysisResult, time.Since(started)))
 	}
 	pipeline, err := analysis.BuildPipelineResult(job.TenantID, d.SchemaVersion, d.NormalizationVersion, []analysis.RawEvent{{
@@ -315,7 +320,7 @@ func analysisInputHash(promptVersion, schemaVersion string, evidenceIDs []string
 // persistCandidatesForEvents persists periodic consolidation candidates. Owner
 // is resolved from the evidence session so candidates stay correctly scoped.
 func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job ports.OutboxJob, events []ports.PendingAnalysisEvent, candidates []ports.CandidateMemory, promptVersion, inputHash string) error {
-	if d.Candidates == nil {
+	if d.Candidates == nil && d.WorkingMemory == nil {
 		return nil
 	}
 	sessionByRawID := make(map[string]string, len(events))
@@ -353,6 +358,7 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 		} else {
 			scopeID = owner
 		}
+		status, defaultRetrieval := candidateStatus(candidate.ScopeType)
 		id, err := newID()
 		if err != nil {
 			return err
@@ -380,34 +386,65 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 			ScopeType:        candidate.ScopeType,
 			ScopeID:          scopeID,
 			MemoryType:       "insight",
-			Status:           "candidate",
+			Status:           status,
 			Visibility:       "private",
 			Confidence:       candidate.Confidence,
 			Content:          candidate.Content,
 			ContentText:      candidateContentText(candidate.Content),
-			DefaultRetrieval: false,
+			DefaultRetrieval: defaultRetrieval,
 			Provenance:       provenance,
 		}, Evidence: evidence})
 	}
 	if len(records) == 0 {
 		return nil
 	}
-	_, err := d.Candidates.PersistCandidates(ctx, job.TenantID, records)
-	if err == nil {
-		d.recordCandidateAudit(ctx, job, records)
-		if d.Runs != nil {
-			ids := make([]string, 0, len(records))
-			for _, record := range records {
-				ids = append(ids, record.Node.ID)
-			}
-			_, _ = d.Runs.LinkRunOutputs(context.WithoutCancel(ctx), job.TenantID, job.ID, ids)
-		}
-	}
-	return err
+	return d.persistMemoryRecords(ctx, job, records)
 }
 
-// recordCandidateAudit records durable provenance for each model-produced
-// candidate so its origin (model, task, prompt version, evidence) is traceable.
+// persistMemoryRecords routes each gathered record to the writer that owns its
+// scope. Session working memory is active on arrival and queryable during the
+// same session; the user-global background tree is persisted as candidates and
+// promoted only by governance. Audit and run-output linking cover both, so the
+// provenance of every produced memory stays in one trail.
+func (d *JobDispatcher) persistMemoryRecords(ctx context.Context, job ports.OutboxJob, records []ports.CandidateMemoryRecord) error {
+	working := make([]ports.WorkingMemoryRecord, 0, len(records))
+	candidates := make([]ports.CandidateMemoryRecord, 0, len(records))
+	for _, record := range records {
+		if record.Node.ScopeType == "session" {
+			working = append(working, ports.WorkingMemoryRecord{Node: record.Node, Evidence: record.Evidence})
+			continue
+		}
+		candidates = append(candidates, record)
+	}
+	if len(working) > 0 {
+		if d.WorkingMemory == nil {
+			return errors.New("working memory writer is not configured")
+		}
+		if _, err := d.WorkingMemory.PersistWorkingMemory(ctx, job.TenantID, working); err != nil {
+			return err
+		}
+	}
+	if len(candidates) > 0 {
+		if d.Candidates == nil {
+			return errors.New("candidate writer is not configured")
+		}
+		if _, err := d.Candidates.PersistCandidates(ctx, job.TenantID, candidates); err != nil {
+			return err
+		}
+	}
+	d.recordCandidateAudit(ctx, job, records)
+	if d.Runs != nil {
+		ids := make([]string, 0, len(records))
+		for _, record := range records {
+			ids = append(ids, record.Node.ID)
+		}
+		_, _ = d.Runs.LinkRunOutputs(context.WithoutCancel(ctx), job.TenantID, job.ID, ids)
+	}
+	return nil
+}
+
+// recordCandidateAudit records durable provenance for each produced memory so
+// its origin (model, task, prompt version, evidence) is traceable.
 func (d *JobDispatcher) recordCandidateAudit(ctx context.Context, job ports.OutboxJob, records []ports.CandidateMemoryRecord) {
 	if d.Audit == nil {
 		return
@@ -459,7 +496,7 @@ func runUpdateFromResult(result ports.AnalystResult, elapsed time.Duration) port
 // persistCandidates stores model-proposed memories as candidates. A candidate
 // is never promoted here; that stays with governance.
 func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJob, event observation.Event, candidates []ports.CandidateMemory) error {
-	if len(candidates) == 0 || d.Candidates == nil {
+	if len(candidates) == 0 || (d.Candidates == nil && d.WorkingMemory == nil) {
 		return nil
 	}
 	userID := ""
@@ -498,6 +535,7 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 		default:
 			continue
 		}
+		status, defaultRetrieval := candidateStatus(candidate.ScopeType)
 		provenance, err := json.Marshal(map[string]any{
 			"candidate_id":   candidate.CandidateID,
 			"task_type":      event.MessageType,
@@ -517,12 +555,12 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 			ScopeType:        candidate.ScopeType,
 			ScopeID:          scopeID,
 			MemoryType:       "insight",
-			Status:           "candidate",
+			Status:           status,
 			Visibility:       "private",
 			Confidence:       candidate.Confidence,
 			Content:          candidate.Content,
 			ContentText:      candidateContentText(candidate.Content),
-			DefaultRetrieval: false,
+			DefaultRetrieval: defaultRetrieval,
 			Provenance:       provenance,
 		}
 		evidence := make([]ports.MemoryEvidenceRecord, 0, len(candidate.EvidenceEventIDs))
@@ -540,18 +578,39 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 	if len(records) == 0 {
 		return nil
 	}
-	_, err := d.Candidates.PersistCandidates(ctx, job.TenantID, records)
-	if err == nil {
-		d.recordCandidateAudit(ctx, job, records)
-		if d.Runs != nil {
-			ids := make([]string, 0, len(records))
-			for _, record := range records {
-				ids = append(ids, record.Node.ID)
-			}
-			_, _ = d.Runs.LinkRunOutputs(context.WithoutCancel(ctx), job.TenantID, job.ID, ids)
-		}
+	return d.persistMemoryRecords(ctx, job, records)
+}
+
+// captureDeterministicCandidate records a memory that an event already states
+// (an explicit remember or a session-boundary summary) when the configured
+// analyst proposed nothing. It never infers, so it is safe to run even when the
+// event was sent to a model that is disabled, unreachable, or degraded.
+func (d *JobDispatcher) captureDeterministicCandidate(event observation.Event, result *ports.AnalystResult) {
+	if len(result.Candidates) > 0 {
+		return
 	}
-	return err
+	candidate, ok := analysis.DeterministicCandidate(ports.AnalysisEvent{
+		EventID:     event.ID,
+		SessionID:   event.SessionID,
+		OccurredAt:  event.OccurredAt,
+		MessageType: event.MessageType,
+		Payload:     event.Payload,
+	})
+	if !ok {
+		return
+	}
+	result.Candidates = append(result.Candidates, candidate)
+}
+
+// candidateStatus decides the initial governance state for a model-proposed
+// memory. Session working memory is queried during the same session, so it is
+// active immediately; the candidate gate exists to protect the background tree,
+// where an inferred memory must be reviewed before it counts as stable.
+func candidateStatus(scopeType string) (string, bool) {
+	if scopeType == "session" {
+		return "active", true
+	}
+	return "candidate", false
 }
 
 func candidateContentText(content json.RawMessage) string {

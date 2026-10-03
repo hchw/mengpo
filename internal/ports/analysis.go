@@ -22,10 +22,11 @@ type AnalysisBatch struct {
 }
 
 type AnalysisEvent struct {
-	EventID    string          `json:"event_id"`
-	SessionID  string          `json:"session_id,omitempty"`
-	OccurredAt time.Time       `json:"occurred_at"`
-	Payload    json.RawMessage `json:"payload"`
+	EventID     string          `json:"event_id"`
+	SessionID   string          `json:"session_id,omitempty"`
+	OccurredAt  time.Time       `json:"occurred_at"`
+	MessageType string          `json:"message_type,omitempty"`
+	Payload     json.RawMessage `json:"payload"`
 }
 
 type Classification struct {
