@@ -33,7 +33,9 @@ func newProviderAnalystBuilder(cfg config.Config) providerAnalystBuilder {
 }
 
 // Build returns the analyst for an effective configuration. A disabled provider
-// or disabled external analysis degrades to the deterministic rule baseline.
+// or disabled external analysis degrades to the deterministic rule baseline;
+// the dispatcher separately captures explicit instructions and session
+// summaries when no candidate is produced.
 func (b providerAnalystBuilder) Build(cfg providerconfig.EffectiveConfig) (ports.MemoryAnalyst, error) {
 	if !cfg.Enabled || !b.allowExternal {
 		return analysis.RuleFallback{}, nil

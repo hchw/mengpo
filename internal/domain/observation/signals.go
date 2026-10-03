@@ -170,6 +170,25 @@ const (
 
 var memoryIntentMarkers = []string{"remember", "forget", "correct", "preference", "conflict", "memory_intent"}
 
+// sessionBoundaryMarkers are runtime lifecycle events that already carry a
+// distilled span of the session (a compaction or branch summary). They are not
+// explicit memory instructions, but they are exactly the point where session
+// working memory should be extracted, so they trigger consolidation.
+var sessionBoundaryMarkers = []string{"context.compaction", "context.branch_summary"}
+
+// IsSessionBoundary reports whether the event is a context compaction or branch
+// summary produced by the agent runtime. Extraction at these boundaries keeps
+// the periodic sweep as a backstop instead of the only path to session memory.
+func IsSessionBoundary(event Event) bool {
+	kind := strings.ToLower(strings.TrimSpace(event.MessageType))
+	for _, marker := range sessionBoundaryMarkers {
+		if strings.HasPrefix(kind, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // HasMemoryIntent reports whether the event carries an explicit instruction to
 // change long-term memory. It is a local, cheap rule: no model is involved.
 func HasMemoryIntent(event Event) bool {
@@ -206,6 +225,9 @@ func AnalysisTask(event Event) (string, bool) {
 		return TaskConsolidation, true
 	}
 	if HasMemoryIntent(event) {
+		return TaskConsolidation, true
+	}
+	if IsSessionBoundary(event) {
 		return TaskConsolidation, true
 	}
 	return "", false
