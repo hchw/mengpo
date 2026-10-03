@@ -3,6 +3,7 @@ import type { ConsoleApi } from '../api/console';
 import { ApiClientError } from '../api/client';
 import type { CandidateRecord } from '../api/types';
 import { StateView } from '../components/states';
+import { useI18n } from '../i18n';
 
 export type ReviewAction = 'confirm' | 'reject' | 'correct' | 'merge' | 'expire' | 'delete';
 
@@ -15,10 +16,13 @@ interface ReviewOutcome {
   action: ReviewAction;
 }
 
+const ACTIONS: ReviewAction[] = ['confirm', 'reject', 'correct', 'merge', 'expire', 'delete'];
+
 // CandidateReviewPage applies governance decisions with optimistic updates.
 // A conflicted decision (HTTP 409) rolls the candidate list back and surfaces a
 // conflict state instead of leaving the UI out of sync.
 export function CandidateReviewPage({ api }: CandidateReviewPageProps) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
   const [error, setError] = useState<unknown>();
   const [candidates, setCandidates] = useState<CandidateRecord[]>([]);
@@ -71,21 +75,26 @@ export function CandidateReviewPage({ api }: CandidateReviewPageProps) {
     return <StateView kind="error" error={error} />;
   }
   if (status === 'empty') {
-    return <StateView kind="empty" description="No candidate memories awaiting review." />;
+    return <StateView kind="empty" description={t('review.empty')} />;
   }
   return (
     <section aria-labelledby="review-title" className="page page--review">
-      <h1 id="review-title">Candidate Review</h1>
-      {conflict ? <StateView kind="conflict" description="This candidate changed while you were reviewing it." /> : null}
-      {rollback && !conflict ? <StateView kind="rollback" description={`Could not ${rollback.action} candidate ${rollback.candidateId}.`} /> : null}
+      <h1 id="review-title">{t('review.title')}</h1>
+      {conflict ? <StateView kind="conflict" description={t('review.conflict')} /> : null}
+      {rollback && !conflict ? (
+        <StateView
+          kind="rollback"
+          description={t('review.rollback', { action: t(`review.action.${rollback.action}`), id: rollback.candidateId })}
+        />
+      ) : null}
       <ul data-testid="candidate-list">
         {candidates.map((candidate) => (
           <li key={candidate.id} data-testid={`candidate-${candidate.id}`}>
             <span>{candidate.content_summary}</span>
             <span data-testid={`candidate-confidence-${candidate.id}`}>{candidate.confidence.toFixed(2)}</span>
-            {(['confirm', 'reject', 'correct', 'merge', 'expire', 'delete'] as ReviewAction[]).map((action) => (
+            {ACTIONS.map((action) => (
               <button key={action} onClick={() => void decide(candidate, action)}>
-                {action}
+                {t(`review.action.${action}`)}
               </button>
             ))}
           </li>

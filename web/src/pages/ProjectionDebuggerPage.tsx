@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ConsoleApi } from '../api/console';
 import type { ProjectionDebug } from '../api/types';
 import { StateView } from '../components/states';
+import { useI18n } from '../i18n';
 
 export interface ProjectionDebuggerPageProps {
   api: ConsoleApi;
@@ -12,6 +13,7 @@ export interface ProjectionDebuggerPageProps {
 // candidates, ranking reasons, exclusion reasons, budgets, provenance and any
 // degradation. It never hides an excluded candidate.
 export function ProjectionDebuggerPage({ api, initialQuery = '' }: ProjectionDebuggerPageProps) {
+  const { t } = useI18n();
   const [query, setQuery] = useState(initialQuery);
   const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle');
   const [error, setError] = useState<unknown>();
@@ -33,38 +35,47 @@ export function ProjectionDebuggerPage({ api, initialQuery = '' }: ProjectionDeb
 
   return (
     <section aria-labelledby="debugger-title" className="page page--debugger">
-      <h1 id="debugger-title">Projection Debugger</h1>
+      <h1 id="debugger-title">{t('debugger.title')}</h1>
       <label>
-        Query
-        <input aria-label="query" value={query} onChange={(event) => setQuery(event.target.value)} />
+        {t('debugger.query')}
+        <input aria-label={t('debugger.queryAria')} value={query} onChange={(event) => setQuery(event.target.value)} />
       </label>
       <button onClick={run} disabled={query.trim() === ''}>
-        Run projection
+        {t('debugger.run')}
       </button>
       {status === 'loading' ? <StateView kind="loading" /> : null}
       {status === 'error' ? <StateView kind="error" error={error} /> : null}
-      {status === 'empty' ? <StateView kind="empty" description="No candidates were recalled for this query." /> : null}
+      {status === 'empty' ? <StateView kind="empty" description={t('debugger.empty')} /> : null}
       {status === 'ready' && debug ? (
         <div className="debugger-result" data-testid="projection-debug">
           <dl>
-            <dt>Mode</dt>
+            <dt>{t('debugger.mode')}</dt>
             <dd data-testid="debug-mode">{debug.mode}</dd>
-            <dt>Reason</dt>
+            <dt>{t('debugger.reason')}</dt>
             <dd data-testid="debug-reason">{debug.reason}</dd>
-            <dt>Cache</dt>
-            <dd data-testid="debug-cache">{debug.cache_hit ? 'hit' : 'miss'}</dd>
-            <dt>Budget</dt>
+            <dt>{t('debugger.cache')}</dt>
+            <dd data-testid="debug-cache">{debug.cache_hit ? t('debugger.hit') : t('debugger.miss')}</dd>
+            <dt>{t('debugger.budget')}</dt>
             <dd data-testid="debug-budget">
-              candidates={debug.budget.candidates} ranking={debug.budget.ranking} tokens={debug.budget.injection_tokens}
+              {t('debugger.budgetValue', {
+                candidates: debug.budget.candidates,
+                ranking: debug.budget.ranking,
+                tokens: debug.budget.injection_tokens,
+              })}
             </dd>
-            <dt>Usage</dt>
+            <dt>{t('debugger.usage')}</dt>
             <dd data-testid="debug-usage">
-              seen={debug.usage.candidates_seen} ranked={debug.usage.candidates_ranked} injected={debug.usage.candidates_injected} tokens={debug.usage.tokens_injected}
+              {t('debugger.usageValue', {
+                seen: debug.usage.candidates_seen,
+                ranked: debug.usage.candidates_ranked,
+                injected: debug.usage.candidates_injected,
+                tokens: debug.usage.tokens_injected,
+              })}
             </dd>
           </dl>
           {debug.degraded ? (
             <div data-testid="debug-degraded">
-              <h2>Degraded</h2>
+              <h2>{t('debugger.degraded')}</h2>
               <ul>
                 {debug.degraded_reasons.map((reason) => (
                   <li key={reason}>{reason}</li>
@@ -75,18 +86,18 @@ export function ProjectionDebuggerPage({ api, initialQuery = '' }: ProjectionDeb
           <table>
             <thead>
               <tr>
-                <th>Memory</th>
-                <th>Included</th>
-                <th>Score</th>
-                <th>Reason / Exclusion</th>
-                <th>Provenance</th>
+                <th>{t('debugger.memory')}</th>
+                <th>{t('debugger.included')}</th>
+                <th>{t('debugger.score')}</th>
+                <th>{t('debugger.reasonExclusion')}</th>
+                <th>{t('debugger.provenance')}</th>
               </tr>
             </thead>
             <tbody data-testid="debug-candidates">
               {debug.candidates.map((candidate) => (
                 <tr key={candidate.memory_id} data-testid={`debug-candidate-${candidate.memory_id}`}>
                   <td>{candidate.memory_id}</td>
-                  <td>{candidate.included ? 'yes' : 'no'}</td>
+                  <td>{candidate.included ? t('debugger.yes') : t('debugger.no')}</td>
                   <td>{candidate.score.toFixed(3)}</td>
                   <td>{candidate.included ? JSON.stringify(candidate.reason) : candidate.excluded_reason}</td>
                   <td>{candidate.provenance.join(',')}</td>

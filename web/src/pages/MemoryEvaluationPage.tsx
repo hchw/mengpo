@@ -2,20 +2,21 @@ import { useEffect, useState } from 'react';
 import type { ConsoleApi } from '../api/console';
 import type { EvaluationSnapshot } from '../api/types';
 import { StateView } from '../components/states';
+import { useI18n } from '../i18n';
 
 export interface MemoryEvaluationPageProps {
   api: ConsoleApi;
 }
 
-const METRICS: Array<{ key: keyof EvaluationSnapshot; label: string; unit: 'percent' | 'ms' | 'count' | 'usd' }> = [
-  { key: 'retrieval_precision', label: 'Retrieval precision', unit: 'percent' },
-  { key: 'promotion_precision', label: 'Promotion precision', unit: 'percent' },
-  { key: 'wrong_memory_rate', label: 'Wrong memory rate', unit: 'percent' },
-  { key: 'attribution_accuracy', label: 'Attribution accuracy', unit: 'percent' },
-  { key: 'latency_ms_p95', label: 'Latency p95', unit: 'ms' },
-  { key: 'tokens_per_projection', label: 'Tokens / projection', unit: 'count' },
-  { key: 'cost_usd', label: 'Cost', unit: 'usd' },
-  { key: 'cache_hit_rate', label: 'Cache hit rate', unit: 'percent' },
+const METRICS: Array<{ key: keyof EvaluationSnapshot; unit: 'percent' | 'ms' | 'count' | 'usd' }> = [
+  { key: 'retrieval_precision', unit: 'percent' },
+  { key: 'promotion_precision', unit: 'percent' },
+  { key: 'wrong_memory_rate', unit: 'percent' },
+  { key: 'attribution_accuracy', unit: 'percent' },
+  { key: 'latency_ms_p95', unit: 'ms' },
+  { key: 'tokens_per_projection', unit: 'count' },
+  { key: 'cost_usd', unit: 'usd' },
+  { key: 'cache_hit_rate', unit: 'percent' },
 ];
 
 function format(value: number | string, unit: string): string {
@@ -36,6 +37,7 @@ function format(value: number | string, unit: string): string {
 
 // MemoryEvaluationPage renders the offline evaluation snapshot for the tenant.
 export function MemoryEvaluationPage({ api }: MemoryEvaluationPageProps) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<unknown>();
   const [snapshot, setSnapshot] = useState<EvaluationSnapshot>();
@@ -69,12 +71,12 @@ export function MemoryEvaluationPage({ api }: MemoryEvaluationPageProps) {
   }
   return (
     <section aria-labelledby="evaluation-title" className="page page--evaluation">
-      <h1 id="evaluation-title">Memory Evaluation</h1>
-      <p data-testid="evaluation-generated">Generated {new Date(snapshot.generated_at).toISOString()}</p>
+      <h1 id="evaluation-title">{t('evaluation.title')}</h1>
+      <p data-testid="evaluation-generated">{t('evaluation.generated', { time: new Date(snapshot.generated_at).toISOString() })}</p>
       <dl data-testid="evaluation-metrics">
         {METRICS.map((metric) => (
           <div key={metric.key}>
-            <dt>{metric.label}</dt>
+            <dt>{t(`evaluation.${metric.key}`)}</dt>
             <dd data-testid={`metric-${metric.key}`}>{format(snapshot[metric.key], metric.unit)}</dd>
           </div>
         ))}

@@ -25,15 +25,20 @@ func NewTenantScheduleStore(db *sql.DB) *TenantScheduleStore {
 func (s *TenantScheduleStore) Load(ctx context.Context, tenantID, name string) (ports.Schedule, bool, error) {
 	var cadenceSeconds int
 	var enabled bool
+	var nextRun sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
-SELECT cadence_seconds, enabled FROM tenant_schedules WHERE tenant_id = $1 AND name = $2`, tenantID, name).Scan(&cadenceSeconds, &enabled)
+SELECT cadence_seconds, enabled, next_run_at FROM tenant_schedules WHERE tenant_id = $1 AND name = $2`, tenantID, name).Scan(&cadenceSeconds, &enabled, &nextRun)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ports.Schedule{}, false, nil
 	}
 	if err != nil {
 		return ports.Schedule{}, false, err
 	}
-	return ports.Schedule{Name: name, Cadence: time.Duration(cadenceSeconds) * time.Second, Enabled: enabled}, true, nil
+	schedule := ports.Schedule{Name: name, Cadence: time.Duration(cadenceSeconds) * time.Second, Enabled: enabled}
+	if nextRun.Valid {
+		schedule.NextRun = nextRun.Time
+	}
+	return schedule, true, nil
 }
 
 // Ensure seeds a tenant's schedule row with the registered defaults so the
@@ -73,7 +78,7 @@ func (s *TenantScheduleStore) RecordStatus(ctx context.Context, tenantID, name, 
 	_, err := s.db.ExecContext(ctx, `
 UPDATE tenant_schedules
 SET last_run_at = $3, last_status = $4, last_error = $5, runs = runs + 1,
-	next_run_at = $3 + make_interval(secs => cadence_seconds), updated_at = now()
+	next_run_at = $3::timestamptz + make_interval(secs => cadence_seconds), updated_at = now()
 WHERE tenant_id = $1 AND name = $2`, tenantID, name, at.UTC(), status, errMessage)
 	return err
 }

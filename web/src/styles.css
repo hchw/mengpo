@@ -346,6 +346,18 @@
     @apply flex flex-col gap-4 rounded-2xl border border-line bg-surface p-6 shadow-soft;
   }
 
+  .pagination {
+    @apply mt-4 flex items-center justify-between gap-4;
+  }
+
+  .pagination span {
+    @apply text-sm text-muted;
+  }
+
+  .pagination button {
+    @apply rounded-lg border border-line px-3 py-1.5 text-sm font-medium text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
   /* status pills driven by test ids so pages stay presentation-agnostic */
   [data-testid^="memory-status-"],
   [data-testid^="session-status-"],
@@ -471,4 +483,21 @@
     white-space: nowrap;
     border: 0;
   }
+}
+
+/* ------------------------------------------------------- language toggle */
+.lang-toggle {
+  @apply gap-1.5 px-2.5 py-1;
+}
+
+.lang-toggle__code {
+  @apply inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-surface-2 px-1 text-[11px] font-bold text-ink;
+}
+
+.lang-toggle__label {
+  @apply text-[12px] font-medium;
+}
+
+.auth-card__lang {
+  @apply mb-4 flex justify-end;
 }

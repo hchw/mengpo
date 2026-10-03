@@ -14,11 +14,11 @@ const (
 	DefaultRelationLimit = 20
 
 	// DefaultVectorSimilarityFloor drops loosely related embeddings from the
-	// semantic channel. The local embedding eligibility sample puts paraphrase
-	// similarity above ~0.7 and unrelated concepts below ~0.3, so 0.55 keeps
-	// genuinely semantic neighbours without flooding recall with every stored
-	// vector.
-	DefaultVectorSimilarityFloor = 0.55
+	// semantic channel. It is calibrated for the bundled local model
+	// (bge-small-zh-v1.5): relevant Chinese query/document pairs land around
+	// 0.5-0.7 while unrelated pairs stay below ~0.47, so 0.45 keeps genuinely
+	// semantic neighbours without flooding recall with every stored vector.
+	DefaultVectorSimilarityFloor = 0.45
 )
 
 // RecallRequest describes one candidate recall pass. Query text drives the
@@ -100,7 +100,11 @@ func (s *Service) RecallWithMeta(ctx context.Context, tenantID, userID, sessionI
 			metadata := s.embedder.Metadata()
 			if modelID == "" || modelID == metadata.ModelID {
 				var embedErr error
-				vector, embedErr = s.embedder.Embed(ctx, request.Query)
+				if queryEmbedder, ok := s.embedder.(ports.QueryEmbedder); ok {
+					vector, embedErr = queryEmbedder.EmbedQuery(ctx, request.Query)
+				} else {
+					vector, embedErr = s.embedder.Embed(ctx, request.Query)
+				}
 				if embedErr != nil {
 					meta.Degraded = append(meta.Degraded, "embedding-unavailable: "+embedErr.Error())
 				}

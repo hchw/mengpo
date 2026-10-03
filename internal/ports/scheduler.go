@@ -12,6 +12,9 @@ type Schedule struct {
 	Name    string
 	Cadence time.Duration
 	Enabled bool
+	// NextRun is the persisted next-fire time, when known. Zero means no
+	// persisted schedule exists and the scheduler should start one cadence out.
+	NextRun time.Time
 }
 
 // ScheduledJob is a unit of periodic work. Run is always scoped to a single

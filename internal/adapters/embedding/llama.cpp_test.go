@@ -3,6 +3,7 @@ package embedding
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestLlamaCPPLoadsConfiguredArtifactAndEmbeds(t *testing.T) {
 	if err != nil {
 		t.Skip("llama-embedding is not installed")
 	}
-	artifact := filepath.Join("..", "..", "..", "models", "all-MiniLM-L6-v2-Q8_0.gguf")
+	artifact := filepath.Join("..", "..", "..", "models", "bge-small-zh-v1.5-Q8_0.gguf")
 	if _, err := os.Stat(artifact); err != nil {
 		t.Skip("repository GGUF artifact not available")
 	}
@@ -41,20 +42,20 @@ func TestLlamaCPPLoadsConfiguredArtifactAndEmbeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := adapter.Metadata()
-	if metadata.ModelID != ExpectedModelID || metadata.Dimensions != 384 || !strings.HasSuffix(metadata.Artifact, "Q8_0.gguf") || len(metadata.Version) != 64 {
+	if metadata.ModelID != ExpectedModelID || metadata.Dimensions != ExpectedDimensions || !strings.HasSuffix(metadata.Artifact, "Q8_0.gguf") || len(metadata.Version) != 64 {
 		t.Fatalf("metadata=%#v", metadata)
 	}
 	vector, err := adapter.Embed(context.Background(), "中文代码检索：Go 中的租户路由和向量数据库")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(vector) != 384 {
+	if len(vector) != ExpectedDimensions {
 		t.Fatalf("dimensions=%d", len(vector))
 	}
 }
 
 func TestLlamaCPPRejectsWrongModelIdentityAndMissingArtifact(t *testing.T) {
-	cfg := config.EmbeddingConfig{ModelID: "wrong-model", Artifact: "missing.gguf", Dimensions: 384}
+	cfg := config.EmbeddingConfig{ModelID: "wrong-model", Artifact: "missing.gguf", Dimensions: ExpectedDimensions}
 	if _, err := NewLlamaCPP(cfg); err != ErrInvalidArtifact {
 		t.Fatalf("wrong model error=%v", err)
 	}
@@ -71,4 +72,56 @@ func TestEmbedRejectsInvalidInputAndZeroVector(t *testing.T) {
 	if _, err := parseVector([]byte(`{"data":[]}`)); err == nil {
 		t.Fatal("empty response accepted")
 	}
+}
+
+func TestLlamaCPPAppliesQueryAndDocumentPrefixes(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	stub := filepath.Join(dir, "llama-embedding")
+	script := "#!/bin/sh\n" +
+		"printf '%s' \"$*\" > \"" + argsFile + "\"\n" +
+		"printf '{\"data\":[{\"embedding\":['\n" +
+		fmt.Sprintf("i=1; while [ $i -le %d ]; do printf '0.1'; [ $i -lt %d ] && printf ','; i=$((i+1)); done\n", ExpectedDimensions, ExpectedDimensions) +
+		"printf ']}]}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(dir, "fake.gguf")
+	if err := os.WriteFile(artifact, append([]byte("GGUF"), make([]byte, 24)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	adapter, err := NewLlamaCPP(config.EmbeddingConfig{
+		ModelID:        ExpectedModelID,
+		Artifact:       artifact,
+		Binary:         "llama-embedding",
+		Dimensions:     ExpectedDimensions,
+		QueryPrefix:    "query: ",
+		DocumentPrefix: "passage: ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Embed(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if doc := readArgs(t, argsFile); !strings.Contains(doc, "-p passage: hello") {
+		t.Fatalf("document embedding missing passage prefix: %q", doc)
+	}
+	if _, err := adapter.EmbedQuery(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if q := readArgs(t, argsFile); !strings.Contains(q, "-p query: hello") {
+		t.Fatalf("query embedding missing query prefix: %q", q)
+	}
+}
+
+func readArgs(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

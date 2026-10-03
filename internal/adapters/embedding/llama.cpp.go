@@ -25,16 +25,33 @@ const ExpectedDimensions = config.DefaultEmbeddingDim
 var ErrInvalidArtifact = errors.New("embedding GGUF artifact is invalid or does not match configured model")
 
 type LlamaCPP struct {
-	binary     string
-	artifact   string
-	modelID    string
-	dimensions int
-	sha256     string
+	binary         string
+	artifact       string
+	modelID        string
+	dimensions     int
+	sha256         string
+	pooling        string
+	queryPrefix    string
+	documentPrefix string
+}
+
+// supportedPooling maps the configuration value to the llama-embedding
+// --pooling flag. An empty value defaults to mean for backwards compatibility.
+var supportedPooling = map[string]string{
+	"":     "mean",
+	"mean": "mean",
+	"cls":  "cls",
+	"last": "last",
+	"none": "none",
 }
 
 func NewLlamaCPP(cfg config.EmbeddingConfig) (*LlamaCPP, error) {
 	if cfg.ModelID != ExpectedModelID || cfg.Dimensions != ExpectedDimensions || cfg.Artifact == "" {
 		return nil, ErrInvalidArtifact
+	}
+	pooling, ok := supportedPooling[strings.ToLower(strings.TrimSpace(cfg.Pooling))]
+	if !ok {
+		return nil, fmt.Errorf("%w: unsupported pooling %q", ErrInvalidArtifact, cfg.Pooling)
 	}
 	binary := strings.TrimSpace(cfg.Binary)
 	if binary == "" {
@@ -67,18 +84,32 @@ func NewLlamaCPP(cfg config.EmbeddingConfig) (*LlamaCPP, error) {
 	if _, err := io.Copy(hash, file); err != nil {
 		return nil, err
 	}
-	return &LlamaCPP{binary: resolved, artifact: cfg.Artifact, modelID: cfg.ModelID, dimensions: cfg.Dimensions, sha256: hex.EncodeToString(hash.Sum(nil))}, nil
+	return &LlamaCPP{binary: resolved, artifact: cfg.Artifact, modelID: cfg.ModelID, dimensions: cfg.Dimensions, sha256: hex.EncodeToString(hash.Sum(nil)), pooling: pooling, queryPrefix: cfg.QueryPrefix, documentPrefix: cfg.DocumentPrefix}, nil
 }
 
 func (a *LlamaCPP) Metadata() ports.EmbeddingMetadata {
 	return ports.EmbeddingMetadata{ModelID: a.modelID, Artifact: filepath.Base(a.artifact), Version: a.sha256, Dimensions: a.dimensions}
 }
 
+// Embed embeds a memory document. The configured document prefix tags the
+// input as a passage for models such as multilingual-e5 that expect task tags.
 func (a *LlamaCPP) Embed(ctx context.Context, text string) ([]float32, error) {
+	return a.embed(ctx, a.documentPrefix, text)
+}
+
+// EmbedQuery embeds a retrieval query with the configured query prefix. Recall
+// uses it through ports.QueryEmbedder so query and passage vectors share the
+// same task convention.
+func (a *LlamaCPP) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	return a.embed(ctx, a.queryPrefix, text)
+}
+
+func (a *LlamaCPP) embed(ctx context.Context, prefix, text string) ([]float32, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, ports.ErrInvalidEmbeddingInput
 	}
-	cmd := exec.CommandContext(ctx, a.binary, "-m", a.artifact, "-p", text, "--embd-output-format", "json", "--pooling", "mean", "--embd-normalize", "2", "-ngl", "0")
+	input := prefix + text
+	cmd := exec.CommandContext(ctx, a.binary, "-m", a.artifact, "-p", input, "--embd-output-format", "json", "--pooling", a.pooling, "--embd-normalize", "2", "-ngl", "0")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

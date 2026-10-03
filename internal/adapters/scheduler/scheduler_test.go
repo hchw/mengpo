@@ -14,6 +14,17 @@ type fakeTenants struct{ tenants []string }
 
 func (f fakeTenants) ActiveTenants(context.Context) ([]string, error) { return f.tenants, nil }
 
+// fakeScheduleStore returns one persisted schedule override so tests can control
+// the first-fire time.
+type fakeScheduleStore struct {
+	schedule ports.Schedule
+	ok       bool
+}
+
+func (f fakeScheduleStore) Load(context.Context, string, string) (ports.Schedule, bool, error) {
+	return f.schedule, f.ok, nil
+}
+
 // recordingLocker records every lock key it is asked for and always acquires.
 type recordingLocker struct {
 	mu   sync.Mutex
@@ -79,6 +90,59 @@ func (j *countingJob) count() int64 {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.runs
+}
+
+func TestSchedulerHonorsPersistedOverdueNextRun(t *testing.T) {
+	// A 24h default with a persisted next-run in the past must fire on the next
+	// tick, not be postponed another full cadence by a worker restart.
+	job := &countingJob{name: "consolidate"}
+	store := fakeScheduleStore{
+		schedule: ports.Schedule{Name: "consolidate", Cadence: 24 * time.Hour, Enabled: true, NextRun: time.Now().Add(-time.Hour)},
+		ok:       true,
+	}
+	s := New(Options{Tenants: fakeTenants{tenants: []string{"tenant-a"}}, Overrides: store, TickPeriod: 5 * time.Millisecond})
+	if err := s.Register(job, ports.Schedule{Name: "consolidate", Cadence: 24 * time.Hour, Enabled: true}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for job.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	_ = s.Stop(stopCtx)
+	if job.count() == 0 {
+		t.Fatal("an overdue persisted schedule must run without waiting a full cadence")
+	}
+}
+
+func TestSchedulerWaitsForFuturePersistedNextRun(t *testing.T) {
+	job := &countingJob{name: "consolidate"}
+	store := fakeScheduleStore{
+		schedule: ports.Schedule{Name: "consolidate", Cadence: 24 * time.Hour, Enabled: true, NextRun: time.Now().Add(time.Hour)},
+		ok:       true,
+	}
+	s := New(Options{Tenants: fakeTenants{tenants: []string{"tenant-a"}}, Overrides: store, TickPeriod: 5 * time.Millisecond})
+	if err := s.Register(job, ports.Schedule{Name: "consolidate", Cadence: 24 * time.Hour, Enabled: true}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	_ = s.Stop(stopCtx)
+	if job.count() != 0 {
+		t.Fatalf("a future persisted schedule must not run early, ran %d times", job.count())
+	}
 }
 
 func TestSchedulerRunsOncePerTriggerUnderLock(t *testing.T) {
