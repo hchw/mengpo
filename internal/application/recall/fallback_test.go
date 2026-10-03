@@ -125,3 +125,35 @@ func TestVectorChannelDropsLooseSimilarity(t *testing.T) {
 		t.Fatalf("degraded=%v, want none", meta.Degraded)
 	}
 }
+
+type recordingQueryEmbedder struct {
+	metadata   ports.EmbeddingMetadata
+	queryCalls []string
+	docCalls   []string
+}
+
+func (f *recordingQueryEmbedder) Metadata() ports.EmbeddingMetadata { return f.metadata }
+func (f *recordingQueryEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	f.docCalls = append(f.docCalls, text)
+	return []float32{1, 0, 0, 0}, nil
+}
+func (f *recordingQueryEmbedder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
+	f.queryCalls = append(f.queryCalls, text)
+	return []float32{1, 0, 0, 0}, nil
+}
+
+func TestRecallUsesQueryEmbedderWhenAvailable(t *testing.T) {
+	search := &fakeSearchRepository{byQuery: map[string][]ports.MemorySearchResult{"query": {}}}
+	vectors := &fakeEmbeddingRepository{similar: map[string][]ports.VectorSearchResult{"v1": {}}}
+	embedder := &recordingQueryEmbedder{metadata: ports.EmbeddingMetadata{ModelID: "model", Artifact: "model.gguf", Version: "v1", Dimensions: 4}}
+	service := NewService(search, &fakeRelationRepository{}, &fakeMemoryRepository{}, vectors, embedder)
+	if _, _, err := service.RecallWithMeta(context.Background(), "tenant", "user", "session", RecallRequest{Query: "query"}); err != nil {
+		t.Fatalf("RecallWithMeta(): %v", err)
+	}
+	if len(embedder.queryCalls) != 1 || embedder.queryCalls[0] != "query" {
+		t.Fatalf("query embeddings=%v, want [query]", embedder.queryCalls)
+	}
+	if len(embedder.docCalls) != 0 {
+		t.Fatalf("recall used document embedding for the query: %v", embedder.docCalls)
+	}
+}

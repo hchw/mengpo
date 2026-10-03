@@ -258,6 +258,7 @@ func (s *Scheduler) stateFor(ctx context.Context, e *entry, tenantID string, now
 		if override, ok, err := s.options.Overrides.Load(ctx, tenantID, e.job.Name()); err == nil && ok {
 			schedule.Cadence = override.Cadence
 			schedule.Enabled = override.Enabled
+			schedule.NextRun = override.NextRun
 		}
 	}
 	if ensurer, ok := s.options.Overrides.(ScheduleEnsurer); ok && ensurer != nil {
@@ -265,7 +266,13 @@ func (s *Scheduler) stateFor(ctx context.Context, e *entry, tenantID string, now
 			s.options.Logger.Warn("seed tenant schedule failed", slog.String("tenant", tenantID), slog.String("schedule", e.job.Name()), slog.String("error", err.Error()))
 		}
 	}
-	state := &tenantState{tenantID: tenantID, cadence: schedule.Cadence, enabled: schedule.Enabled, nextRun: now.Add(schedule.Cadence)}
+	// A persisted next-fire time that is already due runs on the next tick
+	// instead of being postponed another full cadence by a worker restart.
+	nextRun := now.Add(schedule.Cadence)
+	if !schedule.NextRun.IsZero() {
+		nextRun = schedule.NextRun
+	}
+	state := &tenantState{tenantID: tenantID, cadence: schedule.Cadence, enabled: schedule.Enabled, nextRun: nextRun}
 	state.status = ports.ScheduleStatus{Name: e.job.Name(), Cadence: schedule.Cadence, NextRun: state.nextRun, LastStatus: "pending"}
 	e.tenants[tenantID] = state
 	return state

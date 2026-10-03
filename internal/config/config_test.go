@@ -29,7 +29,7 @@ func TestLoadFromUsesSafeDefaults(t *testing.T) {
 	if cfg.Providers.MemoryLLM.Enabled || cfg.Providers.Embedding.Enabled || cfg.Providers.Reranker.Enabled {
 		t.Fatal("optional providers must be disabled until explicitly configured")
 	}
-	if cfg.Providers.Embedding.ModelID != DefaultEmbeddingModel || cfg.Providers.Embedding.Dimensions != 384 {
+	if cfg.Providers.Embedding.ModelID != DefaultEmbeddingModel || cfg.Providers.Embedding.Dimensions != DefaultEmbeddingDim {
 		t.Fatalf("unexpected embedding defaults: %#v", cfg.Providers.Embedding)
 	}
 	if cfg.Queue.Adapter != "nats-core" || cfg.Scopes[0] != "user-global" || cfg.Scopes[1] != "session" {

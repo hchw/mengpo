@@ -10,8 +10,17 @@ import (
 )
 
 const (
-	DefaultEmbeddingModel = "all-MiniLM-L6-v2"
-	DefaultEmbeddingDim   = 384
+	DefaultEmbeddingModel = "bge-small-zh-v1.5"
+	DefaultEmbeddingDim   = 512
+)
+
+// Default embedding task configuration. bge-small-zh-v1.5 is a Chinese BERT
+// model with wordpiece tokenization; it uses CLS pooling and recommends an
+// instruction prefix on retrieval queries (documents carry no prefix).
+const (
+	DefaultEmbeddingPooling        = "cls"
+	DefaultEmbeddingQueryPrefix    = "为这个句子生成表示以用于检索相关文章："
+	DefaultEmbeddingDocumentPrefix = ""
 )
 
 type LookupEnv func(string) (string, bool)
@@ -82,11 +91,14 @@ type SchedulerConfig struct {
 }
 
 type EmbeddingConfig struct {
-	Enabled    bool
-	ModelID    string
-	Artifact   string
-	Binary     string
-	Dimensions int
+	Enabled        bool
+	ModelID        string
+	Artifact       string
+	Binary         string
+	Dimensions     int
+	Pooling        string
+	QueryPrefix    string
+	DocumentPrefix string
 }
 
 type RerankerConfig struct {
@@ -143,11 +155,14 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 				MaxAttempts: 3,
 			},
 			Embedding: EmbeddingConfig{
-				Enabled:    false,
-				ModelID:    DefaultEmbeddingModel,
-				Artifact:   envString(lookup, envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"), "models/all-MiniLM-L6-v2-Q8_0.gguf"),
-				Binary:     envString(lookup, envNames("MEMORY_EMBEDDING_BINARY", "EMBEDDING_BINARY"), "llama-embedding"),
-				Dimensions: DefaultEmbeddingDim,
+				Enabled:        false,
+				ModelID:        DefaultEmbeddingModel,
+				Artifact:       envString(lookup, envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"), "models/bge-small-zh-v1.5-Q8_0.gguf"),
+				Binary:         envString(lookup, envNames("MEMORY_EMBEDDING_BINARY", "EMBEDDING_BINARY"), "llama-embedding"),
+				Dimensions:     DefaultEmbeddingDim,
+				Pooling:        envString(lookup, envNames("MEMORY_EMBEDDING_POOLING", "EMBEDDING_POOLING"), DefaultEmbeddingPooling),
+				QueryPrefix:    envString(lookup, envNames("MEMORY_EMBEDDING_QUERY_PREFIX", "EMBEDDING_QUERY_PREFIX"), DefaultEmbeddingQueryPrefix),
+				DocumentPrefix: envString(lookup, envNames("MEMORY_EMBEDDING_DOCUMENT_PREFIX", "EMBEDDING_DOCUMENT_PREFIX"), DefaultEmbeddingDocumentPrefix),
 			},
 			Reranker: RerankerConfig{
 				Enabled: false,
@@ -328,6 +343,9 @@ func EnvNames() map[string][]string {
 		"embedding_enabled":         envNames("MEMORY_EMBEDDING_ENABLED", "EMBEDDING_ENABLED"),
 		"embedding_artifact":        envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"),
 		"embedding_binary":          envNames("MEMORY_EMBEDDING_BINARY", "EMBEDDING_BINARY"),
+		"embedding_pooling":         envNames("MEMORY_EMBEDDING_POOLING", "EMBEDDING_POOLING"),
+		"embedding_query_prefix":    envNames("MEMORY_EMBEDDING_QUERY_PREFIX", "EMBEDDING_QUERY_PREFIX"),
+		"embedding_document_prefix": envNames("MEMORY_EMBEDDING_DOCUMENT_PREFIX", "EMBEDDING_DOCUMENT_PREFIX"),
 		"reranker_enabled":          envNames("MEMORY_RERANKER_ENABLED", "RERANKER_ENABLED"),
 		"reranker_base_url":         envNames("MEMORY_RERANKER_BASE_URL", "RERANKER_BASE_URL"),
 		"reranker_model":            envNames("MEMORY_RERANKER_MODEL", "RERANKER_MODEL"),

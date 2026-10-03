@@ -100,7 +100,7 @@ go run ./cmd/memory-worker   # 启动异步 Worker
 | `HTTP_ADDR` | API 监听地址，默认 `:8080` |
 | `DATABASE_URL` | PostgreSQL 连接串（必需） |
 | `MQ_ADAPTER` / `MQ_URL` | 队列适配器（`nats-core` / `none`）与地址；`none` 时退回数据库轮询 |
-| `EMBEDDING_ENABLED` / `EMBEDDING_ARTIFACT` | 本地 Embedding（默认 `models/all-MiniLM-L6-v2-Q8_0.gguf`） |
+| `EMBEDDING_ENABLED` / `EMBEDDING_ARTIFACT` | 本地 Embedding（默认 `models/bge-small-zh-v1.5-Q8_0.gguf`，中文/多语，512 维，CLS pooling） |
 | `MEMORY_LLM_ENABLED` / `MEMORY_LLM_BASE_URL` / `MEMORY_LLM_MODEL` | Memory LLM 分析 Provider |
 | `RERANKER_ENABLED` / `RERANKER_BASE_URL` / `RERANKER_MODEL` | 独立 Reranker |
 | `MEMORY_REDIS_URL` | 租户隔离缓存（可选） |

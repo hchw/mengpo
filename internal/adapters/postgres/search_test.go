@@ -159,6 +159,28 @@ func TestSearchScopesFiltersPaginatesAndUsesFullTextIndex(t *testing.T) {
 	}
 }
 
+func TestCJKBigramsBoundedDistinctAndSafe(t *testing.T) {
+	got := cjkBigrams("向量检索用什么库", MaxCJKSearchGrams)
+	want := []string{"向量", "量检", "检索", "索用", "用什", "什么", "么库"}
+	if len(got) != len(want) {
+		t.Fatalf("bigrams=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bigram[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+	if cjkBigrams("向", MaxCJKSearchGrams) != nil {
+		t.Fatal("single-rune term must not produce bigrams")
+	}
+	if repeated := cjkBigrams("测测测测测", MaxCJKSearchGrams); len(repeated) != 1 {
+		t.Fatalf("repeated run bigrams=%v, want one distinct gram", repeated)
+	}
+	if long := cjkBigrams(strings.Repeat("测", 100)+"字", MaxCJKSearchGrams); len(long) > MaxCJKSearchGrams {
+		t.Fatalf("bigram count %d exceeds cap %d", len(long), MaxCJKSearchGrams)
+	}
+}
+
 func TestSearchMatchesAnyTermIncludingCJK(t *testing.T) {
 	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -203,6 +225,7 @@ func TestSearchMatchesAnyTermIncludingCJK(t *testing.T) {
 	}{
 		{"cjk substring matches", "本地开发", 1},
 		{"cjk contiguous run matches", "存向量", 1},
+		{"cjk partial-overlap query matches", "向量检索用什么库", 1},
 		{"english partial prompt still matches", "which database should I use, pgvector or faiss?", 1},
 		{"multi-term query matches both memories", "pgvector redis", 2},
 		{"english prefix matches compound", "tailwind", 1},

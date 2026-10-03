@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ConsoleApi } from '../api/console';
 import type { MemoryRecord, MemoryStatus } from '../api/types';
 import { StateView } from '../components/states';
+import { useI18n } from '../i18n';
 
 export interface BackgroundMemoryPageProps {
   api: ConsoleApi;
@@ -11,16 +12,17 @@ export interface BackgroundMemoryPageProps {
 
 const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
-const FILTERS: Array<{ label: string; value: 'all' | MemoryStatus }> = [
-  { label: 'All', value: 'all' },
-  { label: 'Active', value: 'active' },
-  { label: 'Stable', value: 'stable' },
-  { label: 'Conflicted', value: 'conflicted' },
+const FILTERS: Array<{ labelKey: string; value: 'all' | MemoryStatus }> = [
+  { labelKey: 'background.filter.all', value: 'all' },
+  { labelKey: 'background.filter.active', value: 'active' },
+  { labelKey: 'background.filter.stable', value: 'stable' },
+  { labelKey: 'background.filter.conflicted', value: 'conflicted' },
 ];
 
 // BackgroundMemoryPage lists long-lived (non-session) memories with a status
 // filter and a stale indicator for memories that have not been reinforced.
 export function BackgroundMemoryPage({ api, now = () => Date.now() }: BackgroundMemoryPageProps) {
+  const { t } = useI18n();
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
   const [error, setError] = useState<unknown>();
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
@@ -51,21 +53,21 @@ export function BackgroundMemoryPage({ api, now = () => Date.now() }: Background
     return <StateView kind="error" error={error} />;
   }
   if (status === 'empty') {
-    return <StateView kind="empty" description="No background memories yet." />;
+    return <StateView kind="empty" description={t('background.empty')} />;
   }
   const visible = filter === 'all' ? memories : memories.filter((memory) => memory.status === filter);
   return (
     <section aria-labelledby="background-title" className="page page--background">
-      <h1 id="background-title">Background Memory</h1>
-      <div role="group" aria-label="status filter" className="filters">
+      <h1 id="background-title">{t('background.title')}</h1>
+      <div role="group" aria-label={t('background.filterAria')} className="filters">
         {FILTERS.map((option) => (
           <button key={option.value} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>
-            {option.label}
+            {t(option.labelKey)}
           </button>
         ))}
       </div>
       {visible.length === 0 ? (
-        <p data-testid="filtered-empty">No memories with status {filter}.</p>
+        <p data-testid="filtered-empty">{t('background.noneWithStatus', { status: filter })}</p>
       ) : (
         <ul data-testid="memory-list">
           {visible.map((memory) => {
@@ -74,7 +76,7 @@ export function BackgroundMemoryPage({ api, now = () => Date.now() }: Background
               <li key={memory.id} data-testid={`memory-${memory.id}`}>
                 <span>{memory.content_summary}</span>
                 <span data-testid={`memory-status-${memory.id}`}>{memory.status}</span>
-                {stale ? <span data-testid={`memory-stale-${memory.id}`}>stale</span> : null}
+                {stale ? <span data-testid={`memory-stale-${memory.id}`}>{t('background.stale')}</span> : null}
               </li>
             );
           })}

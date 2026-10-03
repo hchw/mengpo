@@ -42,6 +42,21 @@ describe('SessionExplorerPage', () => {
     await user.click(screen.getByText('Session s2'));
     await waitFor(() => expect(screen.getByTestId('session-memories').textContent).toContain('m-s2'));
   });
+
+  it('paginates sessions using the server-reported total', async () => {
+    const listSessions = vi.fn(async (p = 1) => page([session(`s${p}`)], { total: 40, page: p, page_size: 20 }));
+    const api = fakeConsoleApi({
+      listSessions,
+      listMemories: async () => page([memory('m1')]),
+    });
+    render(<SessionExplorerPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('session-list').children.length).toBe(1));
+    expect(screen.getByTestId('pagination-status').textContent).toContain('Page 1 of 2');
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByTestId('pagination-status').textContent).toContain('Page 2 of 2'));
+    expect(listSessions).toHaveBeenCalledWith(2, 20);
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+  });
 });
 
 describe('BackgroundMemoryPage', () => {

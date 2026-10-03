@@ -21,6 +21,9 @@ const (
 	MaxSearchQueryLength  = 4096
 	MaxSearchTerms        = 32
 	MaxSearchTermRunes    = 64
+	// MaxCJKSearchGrams bounds the overlapping bigrams generated per CJK term so
+	// the containment predicate stays small even for long unsegmented runs.
+	MaxCJKSearchGrams = 8
 )
 
 type SearchRepository struct {
@@ -34,7 +37,7 @@ func NewSearchRepository(router *tenantdb.Router) *SearchRepository {
 // term is one retrieval keyword of a query. Latin terms match through the
 // full-text lexeme channel; CJK terms cannot be lexemized by the 'simple'
 // parser (it folds a whole CJK run into one lexeme), so they match through
-// substring containment instead.
+// substring containment of their overlapping bigrams instead.
 type term struct {
 	text string
 	cjk  bool
@@ -71,6 +74,29 @@ func containsCJK(text string) bool {
 		}
 	}
 	return false
+}
+
+// cjkBigrams returns up to limit distinct overlapping two-rune shingles of a CJK
+// run. The 'simple' full-text parser folds a whole CJK run into one lexeme, so a
+// query whose wording differs from the stored text would otherwise only match as
+// a whole-string substring. Bigrams add partial-overlap recall; the score is the
+// fraction of query bigrams present, so closer wording still ranks higher.
+func cjkBigrams(text string, limit int) []string {
+	runes := []rune(text)
+	if len(runes) < 2 || limit < 1 {
+		return nil
+	}
+	grams := make([]string, 0, limit)
+	seen := make(map[string]bool, limit)
+	for i := 0; i+1 < len(runes) && len(grams) < limit; i++ {
+		gram := string(runes[i : i+2])
+		if seen[gram] {
+			continue
+		}
+		seen[gram] = true
+		grams = append(grams, gram)
+	}
+	return grams
 }
 
 // Search always restricts results to the user's tenant-local User Global Memory
@@ -113,9 +139,22 @@ func (r *SearchRepository) Search(ctx context.Context, tenantID, userID, session
 	}
 	for _, t := range terms {
 		if t.cjk {
-			matchParts = append(matchParts, fmt.Sprintf("position($%d in coalesce(content_text, '')) > 0", len(args)+1))
-			scoreParts = append(scoreParts, fmt.Sprintf("(CASE WHEN position($%d in coalesce(content_text, '')) > 0 THEN 0.6::real ELSE 0 END)", len(args)))
-			args = append(args, t.text)
+			grams := cjkBigrams(t.text, MaxCJKSearchGrams)
+			if len(grams) <= 1 {
+				// Short run: exact containment, no partial-overlap signal.
+				matchParts = append(matchParts, fmt.Sprintf("position($%d in coalesce(content_text, '')) > 0", len(args)+1))
+				scoreParts = append(scoreParts, fmt.Sprintf("(CASE WHEN position($%d in coalesce(content_text, '')) > 0 THEN 0.6::real ELSE 0 END)", len(args)))
+				args = append(args, t.text)
+				continue
+			}
+			hits := make([]string, 0, len(grams))
+			for _, gram := range grams {
+				hits = append(hits, fmt.Sprintf("(CASE WHEN position($%d in coalesce(content_text, '')) > 0 THEN 1 ELSE 0 END)", len(args)+1))
+				args = append(args, gram)
+			}
+			hitCount := "(" + strings.Join(hits, " + ") + ")"
+			matchParts = append(matchParts, hitCount+" > 0")
+			scoreParts = append(scoreParts, fmt.Sprintf("(0.6::real * %s / %d)", hitCount, len(grams)))
 			continue
 		}
 		// Latin terms match lexemes with a prefix so a query word also hits its

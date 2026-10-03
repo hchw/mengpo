@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { useI18n } from '../i18n';
 
 export interface ErrorBoundaryProps {
   children: ReactNode;
@@ -8,6 +9,18 @@ export interface ErrorBoundaryProps {
 
 interface ErrorBoundaryState {
   error?: Error;
+}
+
+// ErrorFallback is a functional component so it can read the active language.
+function ErrorFallback({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  const { t } = useI18n();
+  return (
+    <section role="alert" className="state state--error">
+      <h2>{t('error.title')}</h2>
+      <p>{error.message}</p>
+      <button onClick={onRetry}>{t('error.retry')}</button>
+    </section>
+  );
 }
 
 // ErrorBoundary turns an unexpected render failure into an explicit error state
@@ -33,13 +46,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       if (this.props.fallback) {
         return this.props.fallback(error, this.reset);
       }
-      return (
-        <section role="alert" className="state state--error">
-          <h2>Something went wrong</h2>
-          <p>{error.message}</p>
-          <button onClick={this.reset}>Retry</button>
-        </section>
-      );
+      return <ErrorFallback error={error} onRetry={this.reset} />;
     }
     return this.props.children;
   }

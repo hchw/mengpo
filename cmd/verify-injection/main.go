@@ -90,7 +90,7 @@ var corpus = []fixture{
 	{"k8s", "生产部署走 k8s,探针区分 liveness 和 readiness:migrations 没跑完时 readiness 必须为 false,避免流量打进还没升级完的租户 schema。"},
 	{"llmprompt", "模型提示词一律版本化,llmprompt 里写死输出契约并要求只返回 JSON。候选记忆必须引用真实存在的事件 id,模型不允许发明证据;调用失败要有界重试后降级到规则基线,不能让分析阻塞主链路。"},
 	{"audittrail", "所有治理动作都要写 audittrail:谁、什么时候、对哪条记忆、做了什么、理由是什么。审计记录只追加不修改,租户删除时随 schema 一起销毁。"},
-	{"embeddingmodel", "embeddingmodel 固定 all-MiniLM-L6-v2 的 Q8_0 量化版本,模型文件不入库,由构建产物提供并校验 SHA-256。换模型必须走重新嵌入流程,把 embedding_status 置为 stale 后重建,禁止混用不同模型的向量。"},
+	{"embeddingmodel", "embeddingmodel 固定 bge-small-zh-v1.5 的 Q8_0 量化版本(512 维,中文/多语),CLS pooling,查询侧加指令前缀、文档侧不加。模型文件不入库,由构建产物提供并校验 SHA-256。换模型必须走重新嵌入流程:worker 启动时把 embedding_status 置为 stale 并重建向量,禁止混用不同模型的向量。"},
 }
 
 func corpusSlice() []fixture {

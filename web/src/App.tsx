@@ -5,6 +5,7 @@ import { ConsoleApi } from './api/console';
 import { AuthProvider, useAuth, type AuthApi } from './auth/AuthProvider';
 import { ConsoleProvider } from './app/ConsoleContext';
 import { AppRoutes } from './app/AppRoutes';
+import { LanguageProvider } from './i18n';
 import type { Tenant } from './api/types';
 
 export interface AppProps {
@@ -53,11 +54,13 @@ export function App({ authApi, client, principalId }: AppProps) {
   const resolvedClient = useMemo(() => client ?? new ApiClient({ tenantId: 'unselected' }), [client]);
   const resolvedAuthApi = authApi ?? createDefaultAuthApi();
   return (
-    <AuthProvider api={resolvedAuthApi}>
-      <BrowserRouter>
-        <ConsoleShell client={resolvedClient} principalId={principalId} />
-      </BrowserRouter>
-    </AuthProvider>
+    <LanguageProvider>
+      <AuthProvider api={resolvedAuthApi}>
+        <BrowserRouter>
+          <ConsoleShell client={resolvedClient} principalId={principalId} />
+        </BrowserRouter>
+      </AuthProvider>
+    </LanguageProvider>
   );
 }
 

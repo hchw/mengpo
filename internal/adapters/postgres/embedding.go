@@ -13,7 +13,7 @@ import (
 	"github.com/hchw/mengpo/internal/ports"
 )
 
-const VectorDimensions = 384
+const VectorDimensions = 512
 const MaxVectorSearchResults = 100
 
 var ErrInvalidVector = errors.New("invalid embedding vector or metadata")

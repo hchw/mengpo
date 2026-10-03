@@ -21,3 +21,10 @@ type Embedder interface {
 	Embed(context.Context, string) ([]float32, error)
 	Metadata() EmbeddingMetadata
 }
+
+// QueryEmbedder is an optional Embedder capability. When implemented, Recall
+// uses EmbedQuery so retrieval queries carry the model's query task tag rather
+// than the passage tag used for stored memory content.
+type QueryEmbedder interface {
+	EmbedQuery(context.Context, string) ([]float32, error)
+}
