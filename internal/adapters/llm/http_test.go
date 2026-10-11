@@ -146,6 +146,45 @@ func TestTaskTypeDispatch(t *testing.T) {
 	}
 }
 
+func TestProbeIsMinimalAndAcceptsReasoningContent(t *testing.T) {
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		// A reasoning model with an empty message.content but non-empty
+		// reasoning_content must still count as a reachable provider.
+		envelope := map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": "", "reasoning_content": "thinking..."}}}}
+		encoded, _ := json.Marshal(envelope)
+		_, _ = w.Write(encoded)
+	}))
+	defer server.Close()
+
+	adapter, err := New(Options{BaseURL: server.URL, Model: "m", AllowExternal: true, MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := adapter.Probe(context.Background()); err != nil {
+		t.Fatalf("Probe() error = %v", err)
+	}
+	if strings.Contains(body, "response_format") {
+		t.Fatalf("probe must not force response_format, body = %s", body)
+	}
+	if strings.Contains(body, outputContract) {
+		t.Fatalf("probe must not send the analyst output contract")
+	}
+}
+
+func TestProbeRejectsEmptyCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(completion("")))
+	}))
+	defer server.Close()
+	adapter, _ := New(Options{BaseURL: server.URL, Model: "m", AllowExternal: true, MaxAttempts: 1})
+	if err := adapter.Probe(context.Background()); !errors.Is(err, ErrLLMBadResponse) {
+		t.Fatalf("Probe() error = %v, want ErrLLMBadResponse", err)
+	}
+}
+
 func TestExternalAnalysisDisabledSendsNothing(t *testing.T) {
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

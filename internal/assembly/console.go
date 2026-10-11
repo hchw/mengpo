@@ -29,6 +29,7 @@ type ConsoleAPI struct {
 	Members    MemberLister
 	Agents     AgentLister
 	Runs       ports.AnalysisRunStore
+	Triage     ports.CandidateTriageReader
 }
 
 // MemberLister lists tenant members.
@@ -69,13 +70,39 @@ type pagePayload struct {
 }
 
 type memoryItem struct {
-	ID             string  `json:"id"`
-	Type           string  `json:"type"`
-	Status         string  `json:"status"`
-	ScopeType      string  `json:"scope_type"`
-	ContentSummary string  `json:"content_summary"`
-	Confidence     float64 `json:"confidence"`
-	UpdatedAt      string  `json:"updated_at"`
+	ID              string   `json:"id"`
+	Type            string   `json:"type"`
+	Status          string   `json:"status"`
+	ScopeType       string   `json:"scope_type"`
+	ContentSummary  string   `json:"content_summary"`
+	Confidence      float64  `json:"confidence"`
+	UpdatedAt       string   `json:"updated_at"`
+	ProposedBy      string   `json:"proposed_by,omitempty"`
+	EvidenceIDs     []string `json:"evidence_ids,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	PromptVersion   string   `json:"prompt_version,omitempty"`
+	TriageGroup     string   `json:"triage_group,omitempty"`
+	TriageConflicts []string `json:"triage_conflicts,omitempty"`
+	TriagePriority  int      `json:"triage_priority,omitempty"`
+	TriageRationale string   `json:"triage_rationale,omitempty"`
+}
+
+// memoryProvenance mirrors the subset of memory provenance the review surface
+// shows. It is stored on the node when the candidate was proposed.
+type memoryProvenance struct {
+	Provider      string   `json:"provider"`
+	Model         string   `json:"model"`
+	PromptVersion string   `json:"prompt_version"`
+	Evidence      []string `json:"evidence"`
+}
+
+func parseProvenance(raw json.RawMessage) memoryProvenance {
+	var parsed memoryProvenance
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &parsed)
+	}
+	return parsed
 }
 
 type pageResponse struct {
@@ -103,7 +130,7 @@ func (c *ConsoleAPI) handleSessions(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(envelope.Payload, &payload)
 	}
 	result, err := c.Sessions.ListSessions(r.Context(), scoped.TenantID, ports.SessionListRequest{
-		UserID: scoped.UserID, Page: payload.Page, PageSize: payload.PageSize,
+		UserID: scoped.UserID, Page: payload.Page, PageSize: payload.PageSize, WithMemoriesOnly: true,
 	})
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to list sessions")
@@ -165,7 +192,9 @@ func (c *ConsoleAPI) listMemories(w http.ResponseWriter, r *http.Request, candid
 		return
 	}
 	items := make([]memoryItem, 0, len(result.Items))
+	ids := make([]string, 0, len(result.Items))
 	for _, node := range result.Items {
+		provenance := parseProvenance(node.Provenance)
 		items = append(items, memoryItem{
 			ID:             node.ID,
 			Type:           node.MemoryType,
@@ -174,9 +203,41 @@ func (c *ConsoleAPI) listMemories(w http.ResponseWriter, r *http.Request, candid
 			ContentSummary: summarize(node.Content, node.ContentText),
 			Confidence:     node.Confidence,
 			UpdatedAt:      node.UpdatedAt.UTC().Format(time.RFC3339),
+			ProposedBy:     proposedBy(provenance),
+			EvidenceIDs:    provenance.Evidence,
+			Provider:       provenance.Provider,
+			Model:          provenance.Model,
+			PromptVersion:  provenance.PromptVersion,
 		})
+		ids = append(ids, node.ID)
+	}
+	if candidatesOnly && c.Triage != nil && len(ids) > 0 {
+		if findings, err := c.Triage.LatestCandidateTriage(r.Context(), scoped.TenantID, ids); err == nil {
+			for index := range items {
+				finding, ok := findings[items[index].ID]
+				if !ok {
+					continue
+				}
+				items[index].TriageGroup = finding.DuplicateGroup
+				items[index].TriageConflicts = finding.ConflictIDs
+				items[index].TriagePriority = finding.Priority
+				items[index].TriageRationale = finding.Rationale
+			}
+		}
 	}
 	writeAPIData(w, http.StatusOK, pageResponse{Items: items, Total: result.Total, Page: result.Page, PageSize: result.PageSize})
+}
+
+// proposedBy names who proposed a candidate so the review surface can show it.
+func proposedBy(provenance memoryProvenance) string {
+	switch {
+	case provenance.Model != "":
+		return provenance.Model
+	case provenance.Provider != "":
+		return provenance.Provider
+	default:
+		return ""
+	}
 }
 
 func (c *ConsoleAPI) handleCandidateAction(w http.ResponseWriter, r *http.Request) {
@@ -198,15 +259,37 @@ func (c *ConsoleAPI) handleCandidateAction(w http.ResponseWriter, r *http.Reques
 	}
 	switch action {
 	case "confirm":
-		if node.Status == "candidate" {
-			node.Status = "active"
+		// Confirmation goes through the same governance action as automatic
+		// promotion, so a human decision is audited and version-checked too.
+		target := memory.StatusActive
+		if node.Status == "stable" {
+			target = memory.StatusStable
 		}
-		node.Confidence = 1
-		node.DefaultRetrieval = true
-		if _, err := c.Memories.Update(r.Context(), scoped.TenantID, node, node.Version); err != nil {
+		auditID, err := newUUID()
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "INTERNAL", "unable to audit confirmation")
+			return
+		}
+		if _, err := c.Governance.Apply(r.Context(), scoped.TenantID, memoryID, memory.GovernanceCommand{
+			Action:          memory.GovernanceActivate,
+			ExpectedVersion: node.Version,
+			AuditID:         auditID,
+			ActorType:       "user",
+			ActorID:         scoped.UserID,
+			RequestID:       envelope.RequestID,
+			At:              time.Now().UTC(),
+			Promotion: &memory.GovernancePromotion{
+				TargetStatus: target,
+				Confidence:   1,
+				Reason:       "explicit_user_confirmation",
+			},
+		}); err != nil {
 			writeAPIError(w, http.StatusConflict, "CONFLICT", "unable to confirm candidate")
 			return
 		}
+		node.Status = string(target)
+		node.Confidence = 1
+		node.DefaultRetrieval = true
 	case "correct":
 		current, err := governance.FromRecord(node)
 		if err != nil {
@@ -468,6 +551,7 @@ func (c *ConsoleAPI) evaluationSnapshot(ctx context.Context) map[string]any {
 }
 
 func itemFor(node ports.MemoryNodeRecord) map[string]any {
+	provenance := parseProvenance(node.Provenance)
 	return map[string]any{
 		"id":              node.ID,
 		"type":            node.MemoryType,
@@ -476,6 +560,11 @@ func itemFor(node ports.MemoryNodeRecord) map[string]any {
 		"content_summary": summarize(node.Content, node.ContentText),
 		"confidence":      node.Confidence,
 		"updated_at":      node.UpdatedAt.UTC().Format(time.RFC3339),
+		"proposed_by":     proposedBy(provenance),
+		"evidence_ids":    provenance.Evidence,
+		"provider":        provenance.Provider,
+		"model":           provenance.Model,
+		"prompt_version":  provenance.PromptVersion,
 	}
 }
 

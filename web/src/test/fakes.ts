@@ -12,6 +12,7 @@ import type {
   ProjectionDebug,
   SessionSummary,
   AnalysisRun,
+  AnalysisRunDetail,
   ProviderView,
   ScheduleStatus,
 } from '../api/types';
@@ -158,7 +159,25 @@ export function analysisRun(id: string, overrides: Partial<AnalysisRun> = {}): A
     conflict_count: 0,
     degraded_reason: '',
     last_error: '',
+    session_id: '',
+    input_count: 0,
+    output_count: 0,
     created_at: '2024-01-01T00:00:00Z',
+    ...overrides,
+  };
+}
+
+export function analysisRunDetail(id: string, overrides: Partial<AnalysisRunDetail> = {}): AnalysisRunDetail {
+  return {
+    run: analysisRun(id, { task_type: 'analyze_failure', trigger: 'event', degraded_reason: 'primary_timeout', input_count: 1, output_count: 1 }),
+    result: null,
+    inputs: [
+      { id: 'ev-1', source_type: 'tool', message_type: 'tool.failure', session_id: 's1', occurred_at: '2024-01-01T00:00:00Z', payload: '{"stderr":"boom"}' },
+    ],
+    outputs: [
+      { id: 'mem-1', status: 'candidate', memory_type: 'insight', scope_type: 'user-global', confidence: 0.6, content_text: 'boom on retry', created_at: '2024-01-01T00:00:00Z' },
+    ],
+    truncated: false,
     ...overrides,
   };
 }
@@ -183,6 +202,7 @@ export function fakeConsoleApi(overrides: Partial<ConsoleApi> = {}): ConsoleApi 
     listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
     updateSchedule: vi.fn(async () => ({})),
     listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1')] })),
+    getAnalysisRunDetail: vi.fn(async (id: string) => analysisRunDetail(id)),
     ...overrides,
   } as unknown as ConsoleApi;
 }

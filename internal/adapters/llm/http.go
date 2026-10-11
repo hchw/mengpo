@@ -144,6 +144,40 @@ func (h *HTTP) chat(ctx context.Context, system, user string) (string, ports.Ana
 	if h.maxTokens > 0 {
 		payload["max_tokens"] = h.maxTokens
 	}
+	return h.dispatch(ctx, payload)
+}
+
+// Probe performs a minimal connectivity check. Unlike Analyze it does not ask
+// the model to honour the analyst output contract: connectivity is proven by any
+// non-empty completion. This keeps the console "test connection" action working
+// against reasoning models (which often put their answer in reasoning_content)
+// and providers that reject response_format.
+func (h *HTTP) Probe(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if h == nil || !h.allowExternal {
+		return ErrExternalAnalysisDisabled
+	}
+	content, _, err := h.dispatch(ctx, map[string]any{
+		"model": h.model,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Reply with the single word: pong"},
+		},
+		"temperature": 0,
+		"max_tokens":  128,
+	})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("%w: empty completion", ErrLLMBadResponse)
+	}
+	return nil
+}
+
+// dispatch encodes a chat payload and retries transient failures with backoff.
+func (h *HTTP) dispatch(ctx context.Context, payload map[string]any) (string, ports.AnalysisUsage, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return "", ports.AnalysisUsage{}, fmt.Errorf("encode chat request: %w", err)
@@ -195,8 +229,10 @@ func (h *HTTP) chatOnce(ctx context.Context, body []byte) (string, ports.Analysi
 	}
 	var decoded struct {
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
@@ -207,11 +243,25 @@ func (h *HTTP) chatOnce(ctx context.Context, body []byte) (string, ports.Analysi
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return "", ports.AnalysisUsage{}, false, fmt.Errorf("%w: %v", ErrLLMBadResponse, err)
 	}
-	if len(decoded.Choices) == 0 || strings.TrimSpace(decoded.Choices[0].Message.Content) == "" {
+	// Some reasoning models leave message.content empty and place the text in
+	// reasoning_content; accept it so callers can at least prove connectivity.
+	content := ""
+	finishReason := ""
+	if len(decoded.Choices) > 0 {
+		content = decoded.Choices[0].Message.Content
+		finishReason = decoded.Choices[0].FinishReason
+		if strings.TrimSpace(content) == "" {
+			content = decoded.Choices[0].Message.ReasoningContent
+		}
+	}
+	if strings.TrimSpace(content) == "" {
+		if finishReason != "" {
+			return "", ports.AnalysisUsage{}, false, fmt.Errorf("%w: empty completion (finish_reason=%s)", ErrLLMBadResponse, finishReason)
+		}
 		return "", ports.AnalysisUsage{}, false, fmt.Errorf("%w: empty completion", ErrLLMBadResponse)
 	}
 	usage := ports.AnalysisUsage{PromptTokens: decoded.Usage.PromptTokens, CompletionTokens: decoded.Usage.CompletionTokens}
-	return decoded.Choices[0].Message.Content, usage, false, nil
+	return content, usage, false, nil
 }
 
 // parseAnalystResult decodes the model's JSON object into a ports.AnalystResult.

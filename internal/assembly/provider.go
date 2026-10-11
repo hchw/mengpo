@@ -2,7 +2,6 @@ package assembly
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -71,18 +70,7 @@ func (b providerAnalystBuilder) Probe(ctx context.Context, cfg providerconfig.Ef
 		return providerconfig.ProbeResult{}, err
 	}
 	started := time.Now()
-	_, err = adapter.Analyze(ctx, ports.AnalysisBatch{
-		TenantID:      "probe",
-		RunID:         "probe",
-		TaskType:      "classify_event",
-		PromptVersion: "probe",
-		SchemaVersion: "probe",
-		Events: []ports.AnalysisEvent{{
-			EventID:    "probe",
-			OccurredAt: time.Now().UTC(),
-			Payload:    json.RawMessage(`{"text":"ping"}`),
-		}},
-	})
+	err = adapter.Probe(ctx)
 	latency := time.Since(started)
 	if err != nil {
 		if errors.Is(err, llm.ErrExternalAnalysisDisabled) {

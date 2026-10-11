@@ -86,6 +86,22 @@ func (opsRuns) ListAnalysisRuns(context.Context, string, ports.AnalysisRunFilter
 	}, CandidateCount: 2, LatencyMS: 12}}, nil
 }
 
+type opsRunDetails struct{}
+
+func (opsRunDetails) GetAnalysisRunDetail(_ context.Context, _, runID string, _ int) (ports.AnalysisRunDetail, bool, error) {
+	if runID != "run-1" {
+		return ports.AnalysisRunDetail{}, false, nil
+	}
+	return ports.AnalysisRunDetail{
+		Run: ports.AnalysisRunView{AnalysisRunRecord: ports.AnalysisRunRecord{
+			ID: "run-1", TaskType: "analyze_failure", Trigger: ports.TriggerEvent, Status: "succeeded",
+			InputEventIDs: []string{"ev-1"}, CreatedAt: time.Unix(0, 0).UTC(),
+		}, OutputMemoryIDs: []string{"mem-1"}, DegradedReason: "primary_timeout"},
+		Inputs:  []ports.AnalysisRunInput{{ID: "ev-1", SourceType: "tool", MessageType: "tool.failure", Payload: `{"stderr":"boom"}`, OccurredAt: time.Unix(0, 0).UTC()}},
+		Outputs: []ports.AnalysisRunOutput{{ID: "mem-1", Status: "candidate", MemoryType: "insight", ScopeType: "user-global", Confidence: 0.6, ContentText: "boom on retry", CreatedAt: time.Unix(0, 0).UTC()}},
+	}, true, nil
+}
+
 type opsAudit struct{ events []ports.AuditEventRecord }
 
 func (f *opsAudit) RecordAuditEvent(_ context.Context, _ string, event ports.AuditEventRecord) error {
@@ -106,8 +122,9 @@ func opsHandler(t *testing.T, roles []string, store *opsStore, schedules *opsSch
 		ScheduleStatus: func(context.Context, string) ([]ports.ScheduleStatus, error) {
 			return []ports.ScheduleStatus{{Name: "consolidate", Cadence: 24 * time.Hour, LastStatus: "ok"}}, nil
 		},
-		Runs:  opsRuns{},
-		Audit: audit,
+		Runs:       opsRuns{},
+		RunDetails: opsRunDetails{},
+		Audit:      audit,
 	}
 	mux := http.NewServeMux()
 	ops.Register(mux)
@@ -234,5 +251,35 @@ func TestScheduleAndAnalysisRunEndpoints(t *testing.T) {
 	run := runs[0].(map[string]any)
 	if run["task_type"] != "consolidate_memory" || run["candidate_count"].(float64) != 2 {
 		t.Fatalf("analysis run = %#v", run)
+	}
+}
+
+func TestAnalysisRunDetailEndpoint(t *testing.T) {
+	handler := opsHandler(t, []string{"owner"}, &opsStore{}, &opsSchedules{}, &opsAudit{})
+
+	status, body := opsRequest(t, handler, http.MethodPost, "/api/v1/analysis-runs/detail", consoleEnvelope("tenant-a", "user-1", "req-d1", map[string]any{"id": "run-1"}))
+	if status != http.StatusOK {
+		t.Fatalf("detail status = %d body = %#v", status, body)
+	}
+	data := body["data"].(map[string]any)
+	if data["run"].(map[string]any)["task_type"] != "analyze_failure" {
+		t.Fatalf("detail run = %#v", data["run"])
+	}
+	inputs := data["inputs"].([]any)
+	outputs := data["outputs"].([]any)
+	if len(inputs) != 1 || inputs[0].(map[string]any)["message_type"] != "tool.failure" {
+		t.Fatalf("detail inputs = %#v", inputs)
+	}
+	if len(outputs) != 1 || outputs[0].(map[string]any)["content_text"] != "boom on retry" {
+		t.Fatalf("detail outputs = %#v", outputs)
+	}
+
+	status, _ = opsRequest(t, handler, http.MethodPost, "/api/v1/analysis-runs/detail", consoleEnvelope("tenant-a", "user-1", "req-d2", map[string]any{"id": "missing"}))
+	if status != http.StatusNotFound {
+		t.Fatalf("missing detail status = %d", status)
+	}
+	status, _ = opsRequest(t, handler, http.MethodPost, "/api/v1/analysis-runs/detail", consoleEnvelope("tenant-a", "user-1", "req-d3", map[string]any{}))
+	if status != http.StatusBadRequest {
+		t.Fatalf("missing id status = %d", status)
 	}
 }

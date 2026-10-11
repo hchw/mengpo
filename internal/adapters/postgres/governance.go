@@ -216,6 +216,7 @@ func validateGovernanceMutationRecord(mutation ports.MemoryGovernanceMutationRec
 	allowedChanges := map[string]bool{
 		"before_version": true, "after_version": true, "related_resource_id": true,
 		"related_resource_version": true, "redacted": true, "derived_data_purged": true,
+		"reason": true,
 	}
 	for key := range changes {
 		if !allowedChanges[key] {
@@ -252,6 +253,12 @@ func validateGovernanceMutationRecord(mutation ports.MemoryGovernanceMutationRec
 	case "expire":
 		if memoryRecord.Status != "expired" || memoryRecord.DefaultRetrieval || memoryRecord.ExpiresAt == nil || mutation.Replacement != nil || mutation.Relation != nil ||
 			mutation.PurgeDerivedData || mutation.InvalidateEmbedding || redacted || derivedDataPurged || relatedID != "" {
+			return ErrInvalidGovernanceMutation
+		}
+	case "activate":
+		if (memoryRecord.Status != "active" && memoryRecord.Status != "stable") || !memoryRecord.DefaultRetrieval ||
+			mutation.Replacement != nil || mutation.Relation != nil || mutation.PurgeDerivedData || mutation.InvalidateEmbedding ||
+			redacted || derivedDataPurged || relatedID != "" {
 			return ErrInvalidGovernanceMutation
 		}
 	case "redact":

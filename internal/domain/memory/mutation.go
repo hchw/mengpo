@@ -21,7 +21,18 @@ const (
 	GovernanceDelete    GovernanceAction = "delete"
 	GovernanceRedact    GovernanceAction = "redact"
 	GovernanceSupersede GovernanceAction = "supersede"
+	GovernanceActivate  GovernanceAction = "activate"
 )
+
+// GovernancePromotion carries the evidence-derived promotion decision onto the
+// governance command. The decision is computed by EvaluateGovernance (which owns
+// the evidence read); the action only applies the resulting state and confidence
+// so the two never disagree about the same evidence.
+type GovernancePromotion struct {
+	TargetStatus MemoryStatus
+	Confidence   float64
+	Reason       string
+}
 
 type MemoryRedaction struct {
 	Content       json.RawMessage
@@ -40,6 +51,7 @@ type GovernanceCommand struct {
 	RelationID      string
 	Replacement     *Memory
 	Redaction       *MemoryRedaction
+	Promotion       *GovernancePromotion
 }
 
 type GovernanceAuditChanges struct {
@@ -49,6 +61,7 @@ type GovernanceAuditChanges struct {
 	RelatedResourceVersion int64  `json:"related_resource_version,omitempty"`
 	Redacted               bool   `json:"redacted,omitempty"`
 	DerivedDataPurged      bool   `json:"derived_data_purged,omitempty"`
+	Reason                 string `json:"reason,omitempty"`
 }
 
 type GovernanceAuditEvent struct {
@@ -134,6 +147,25 @@ func ApplyGovernanceAction(current Memory, command GovernanceCommand) (Governanc
 		changes.Redacted = true
 		mutation.InvalidateEmbedding = true
 
+	case GovernanceActivate:
+		if command.Promotion == nil {
+			return GovernanceMutation{}, ErrInvalidGovernanceCommand
+		}
+		target := command.Promotion.TargetStatus
+		if target != StatusActive && target != StatusStable {
+			return GovernanceMutation{}, ErrInvalidGovernanceCommand
+		}
+		if updated.Status != target {
+			if err := updated.Transition(target); err != nil {
+				return GovernanceMutation{}, ErrGovernanceActionNotAllowed
+			}
+		}
+		if command.Promotion.Confidence > updated.Confidence {
+			updated.Confidence = command.Promotion.Confidence
+		}
+		updated.DefaultRetrieval = true
+		changes.Reason = command.Promotion.Reason
+
 	case GovernanceCorrect, GovernanceSupersede:
 		if command.Replacement == nil || command.RelationID == "" {
 			return GovernanceMutation{}, ErrInvalidGovernanceCommand
@@ -188,6 +220,11 @@ func validateGovernanceCommand(current Memory, command GovernanceCommand) error 
 	}
 	switch command.Action {
 	case GovernanceReject, GovernanceCorrect, GovernanceExpire, GovernanceDelete, GovernanceRedact, GovernanceSupersede:
+		return nil
+	case GovernanceActivate:
+		if command.Promotion == nil || !finiteUnitInterval(command.Promotion.Confidence) {
+			return ErrInvalidGovernanceCommand
+		}
 		return nil
 	default:
 		return ErrInvalidGovernanceCommand

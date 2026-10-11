@@ -324,8 +324,10 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 		return nil
 	}
 	sessionByRawID := make(map[string]string, len(events))
+	attributionByRawID := make(map[string]string, len(events))
 	for _, event := range events {
 		sessionByRawID[event.RawEventID] = event.SessionID
+		attributionByRawID[event.RawEventID] = event.Attribution
 	}
 	newID := d.NewID
 	if newID == nil {
@@ -376,7 +378,11 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 		}
 		evidence := make([]ports.MemoryEvidenceRecord, 0, len(candidate.EvidenceEventIDs))
 		for _, evidenceID := range candidate.EvidenceEventIDs {
-			evidence = append(evidence, ports.MemoryEvidenceRecord{MemoryID: id, RawEventID: evidenceID, EvidenceRole: "supports", Confidence: candidate.Confidence, Attribution: "inferred"})
+			attribution := attributionByRawID[evidenceID]
+			if attribution == "" {
+				attribution = "inferred"
+			}
+			evidence = append(evidence, ports.MemoryEvidenceRecord{MemoryID: id, RawEventID: evidenceID, EvidenceRole: "supports", Confidence: candidate.Confidence, Attribution: attribution})
 		}
 		records = append(records, ports.CandidateMemoryRecord{Node: ports.MemoryNodeRecord{
 			ID:               id,
@@ -565,12 +571,16 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 		}
 		evidence := make([]ports.MemoryEvidenceRecord, 0, len(candidate.EvidenceEventIDs))
 		for _, eventID := range candidate.EvidenceEventIDs {
+			attribution := string(event.Attribution.Level)
+			if attribution == "" {
+				attribution = "inferred"
+			}
 			evidence = append(evidence, ports.MemoryEvidenceRecord{
 				MemoryID:     id,
 				RawEventID:   eventID,
 				EvidenceRole: "supports",
 				Confidence:   candidate.Confidence,
-				Attribution:  "inferred",
+				Attribution:  attribution,
 			})
 		}
 		records = append(records, ports.CandidateMemoryRecord{Node: node, Evidence: evidence})

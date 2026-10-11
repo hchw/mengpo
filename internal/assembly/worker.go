@@ -202,8 +202,48 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		if err := schedulerComponent.Register(conflict, ports.Schedule{Name: conflict.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
 			return nil, err
 		}
+		candidateRepository := postgres.NewCandidateRepository(router)
+		promotion := &maintenance.PromotionJob{
+			PlanName:   "promotion",
+			Reader:     memoryRepository,
+			Evidence:   candidateRepository,
+			Influence:  candidateRepository,
+			Governance: governance.NewService(memoryRepository),
+			BatchSize:  cfg.Analysis.MaintenanceBatchSize,
+		}
+		if err := schedulerComponent.Register(promotion, ports.Schedule{Name: promotion.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		triageRepository := postgres.NewTriageRepository(router)
+		triage := &maintenance.TriageJob{
+			PlanName:      "triage",
+			Reader:        memoryRepository,
+			Evidence:      candidateRepository,
+			Events:        postgres.NewNormalizedEventRepository(router),
+			Candidates:    candidateRepository,
+			Relations:     triageRepository,
+			Triage:        triageRepository,
+			Analysis:      dispatcher.Analysis,
+			Runs:          runsRepository,
+			PromptVersion: promptVersion,
+			SchemaVersion: "schema-v1",
+			BatchSize:     cfg.Analysis.MaintenanceBatchSize,
+		}
+		if err := schedulerComponent.Register(triage, ports.Schedule{Name: triage.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
 		cleanup := &maintenance.CleanupJob{PlanName: "cleanup", Outbox: postgres.NewOutboxRepository(router), Runs: runsRepository}
 		if err := schedulerComponent.Register(cleanup, ports.Schedule{Name: cleanup.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		sessionCleanup := &maintenance.SessionCleanupJob{
+			PlanName:  "session-cleanup",
+			Sessions:  postgres.NewSessionRepository(router),
+			Audit:     postgres.NewAuditRepository(router),
+			Retention: cfg.Scheduler.SessionRetention,
+			BatchSize: cfg.Analysis.MaintenanceBatchSize,
+		}
+		if err := schedulerComponent.Register(sessionCleanup, ports.Schedule{Name: sessionCleanup.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
 			return nil, err
 		}
 		evaluate := &maintenance.EvaluationJob{PlanName: "evaluation", Reader: memoryRepository, Runs: runsRepository}

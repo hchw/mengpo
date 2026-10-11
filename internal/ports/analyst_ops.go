@@ -76,7 +76,9 @@ type AnalysisRunView struct {
 	LastError        string
 	Attempts         int
 	UpdatedAt        time.Time
-	Result           json.RawMessage
+	// OutputMemoryIDs links the run to the memories it produced.
+	OutputMemoryIDs []string
+	Result          json.RawMessage
 }
 
 // AnalysisRunFilter filters run records for the console.
@@ -99,6 +101,43 @@ type AnalysisRunStore interface {
 	// LinkRunOutputs records the memories a run produced so a later deletion can
 	// clean up the run record.
 	LinkRunOutputs(ctx context.Context, tenantID, runID string, memoryIDs []string) (bool, error)
+}
+
+// AnalysisRunInput is one observed event that fed a run. Payload is a
+// server-truncated JSON text preview so a single run cannot flood the console.
+type AnalysisRunInput struct {
+	ID          string
+	SourceType  string
+	MessageType string
+	SessionID   string
+	OccurredAt  time.Time
+	Payload     string
+}
+
+// AnalysisRunOutput is one memory a run produced.
+type AnalysisRunOutput struct {
+	ID          string
+	Status      string
+	MemoryType  string
+	ScopeType   string
+	Confidence  float64
+	ContentText string
+	CreatedAt   time.Time
+}
+
+// AnalysisRunDetail is a run together with the content behind its inputs and
+// outputs. Truncated reports that the reader hit its per-side item cap.
+type AnalysisRunDetail struct {
+	Run       AnalysisRunView
+	Inputs    []AnalysisRunInput
+	Outputs   []AnalysisRunOutput
+	Truncated bool
+}
+
+// AnalysisRunDetailReader loads the source events and produced memories behind
+// a run so an operator can inspect what a task consumed and emitted.
+type AnalysisRunDetailReader interface {
+	GetAnalysisRunDetail(ctx context.Context, tenantID, runID string, limit int) (AnalysisRunDetail, bool, error)
 }
 
 // MaintenanceCursorStore tracks how far periodic maintenance has processed a

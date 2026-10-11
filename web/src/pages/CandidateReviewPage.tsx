@@ -92,6 +92,26 @@ export function CandidateReviewPage({ api }: CandidateReviewPageProps) {
           <li key={candidate.id} data-testid={`candidate-${candidate.id}`}>
             <span>{candidate.content_summary}</span>
             <span data-testid={`candidate-confidence-${candidate.id}`}>{candidate.confidence.toFixed(2)}</span>
+            {candidate.proposed_by ? (
+              <span data-testid={`candidate-proposed-by-${candidate.id}`}>
+                {t('review.proposedBy')}: {candidate.proposed_by}
+              </span>
+            ) : null}
+            {candidate.evidence_ids && candidate.evidence_ids.length > 0 ? (
+              <span data-testid={`candidate-evidence-${candidate.id}`}>
+                {t('review.evidence')}: {candidate.evidence_ids.length}
+              </span>
+            ) : null}
+            {candidate.triage_group || candidate.triage_rationale ? (
+              <span data-testid={`candidate-triage-${candidate.id}`}>
+                {t('review.triage')}: {candidate.triage_rationale || candidate.triage_group}
+              </span>
+            ) : null}
+            {candidate.triage_conflicts && candidate.triage_conflicts.length > 0 ? (
+              <span data-testid={`candidate-conflicts-${candidate.id}`}>
+                {t('review.conflicts')}: {candidate.triage_conflicts.length}
+              </span>
+            ) : null}
             {ACTIONS.map((action) => (
               <button key={action} onClick={() => void decide(candidate, action)}>
                 {t(`review.action.${action}`)}

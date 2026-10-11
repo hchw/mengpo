@@ -12,7 +12,8 @@ import { MembersPage } from './MembersPage';
 import { SettingsPage } from './SettingsPage';
 import { AnalysisRunsPage } from './AnalysisRunsPage';
 import { ApiClientError } from '../api/client';
-import { agent, analysisRun, candidate, evaluation, failure, fakeConsoleApi, member, memory, page, projection, provider, scheduleStatus, session } from '../test/fakes';
+import { LanguageProvider } from '../i18n';
+import { agent, analysisRun, analysisRunDetail, candidate, evaluation, failure, fakeConsoleApi, member, memory, page, projection, provider, scheduleStatus, session } from '../test/fakes';
 
 const user = userEvent.setup();
 
@@ -190,9 +191,32 @@ describe('AnalysisRunsPage', () => {
     await waitFor(() => expect(screen.getByTestId('analysis-runs').children.length).toBeGreaterThan(0));
     expect(screen.getByTestId('schedule-cadence').textContent).toBe('86400s');
     expect(screen.getByTestId('schedule-status').textContent).toBe('ok');
-    expect(screen.getByTestId('analysis-run-run-1').textContent).toContain('consolidate_memory');
-    expect(screen.getByTestId('analysis-run-run-2').textContent).toContain('rules_only');
+    expect(screen.getByTestId('analysis-run-run-1').textContent).toContain('Consolidate memory');
+    expect(screen.getByTestId('analysis-run-run-2').textContent).toContain('rules only');
     expect(screen.getByTestId('curation-schedule').dataset.failing).toBe('false');
+  });
+
+  it('renders curation enums in Chinese when the language is zh', async () => {
+    const api = fakeConsoleApi({
+      listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
+      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1'), analysisRun('run-2', { status: 'dead_letter', degraded_reason: 'rules_only' })] })),
+    });
+    render(
+      <LanguageProvider initialLanguage="zh">
+        <AnalysisRunsPage api={api} />
+      </LanguageProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('analysis-runs').children.length).toBeGreaterThan(0));
+    expect(screen.getByTestId('schedule-status').textContent).toBe('正常');
+    const first = screen.getByTestId('analysis-run-run-1').textContent ?? '';
+    expect(first).toContain('记忆固化');
+    expect(first).toContain('计划');
+    expect(first).toContain('成功');
+    expect(first).not.toContain('consolidate_memory');
+    const second = screen.getByTestId('analysis-run-run-2').textContent ?? '';
+    expect(second).toContain('死信');
+    expect(second).toContain('仅规则');
+    expect(second).not.toContain('rules_only');
   });
 
   it('highlights a failing schedule', async () => {
@@ -202,5 +226,26 @@ describe('AnalysisRunsPage', () => {
     render(<AnalysisRunsPage api={api} />);
     await waitFor(() => expect(screen.getByTestId('curation-schedule').dataset.failing).toBe('true'));
     expect(screen.getByTestId('schedule-status').textContent).toContain('provider unavailable');
+  });
+
+  it('opens a task detail dialog with its source events and produced memories', async () => {
+    const api = fakeConsoleApi({
+      listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
+      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1')] })),
+      getAnalysisRunDetail: vi.fn(async (id: string) => analysisRunDetail(id)),
+    });
+    render(<AnalysisRunsPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('analysis-run-run-1')).toBeTruthy());
+
+    await user.click(screen.getByRole('button', { name: /Consolidate memory/i }));
+    await waitFor(() => expect(screen.getByTestId('run-detail')).toBeTruthy());
+    expect(screen.getByTestId('run-detail-meta').textContent).toContain('Prompt version');
+    expect(screen.getByTestId('run-detail-inputs').textContent).toContain('tool.failure');
+    expect(screen.getByTestId('run-detail-inputs').textContent).toContain('boom');
+    expect(screen.getByTestId('run-detail-outputs').textContent).toContain('boom on retry');
+    expect(api.getAnalysisRunDetail).toHaveBeenCalledWith('run-1');
+
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.queryByTestId('run-detail')).toBeNull();
   });
 });

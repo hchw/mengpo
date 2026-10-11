@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import type { ConsoleApi } from '../api/console';
-import type { AnalysisRun, ScheduleStatus } from '../api/types';
+import type { AnalysisRun, AnalysisRunDetail, ScheduleStatus } from '../api/types';
 import { StateView } from '../components/states';
 import { useI18n } from '../i18n';
+import { AnalysisRunDetailDialog } from './AnalysisRunDetailDialog';
 
 export interface AnalysisRunsPageProps {
   api: ConsoleApi;
@@ -17,11 +18,15 @@ function formatTime(value: string): string {
 // tenant's own curation schedule, so operators can see what ran and when it
 // next runs without a separate scheduler page.
 export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
-  const { t } = useI18n();
+  const { t, tEnum } = useI18n();
   const [status, setStatus] = useState<'loading' | 'empty' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<unknown>();
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const [schedule, setSchedule] = useState<ScheduleStatus>();
+  const [detailRunId, setDetailRunId] = useState<string>();
+  const [detail, setDetail] = useState<AnalysisRunDetail>();
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<unknown>();
 
   useEffect(() => {
     let cancelled = false;
@@ -42,6 +47,19 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
     };
   }, [api]);
 
+  const openDetail = (id: string) => {
+    setDetailRunId(id);
+    setDetail(undefined);
+    setDetailError(undefined);
+    setDetailLoading(true);
+    api
+      .getAnalysisRunDetail(id)
+      .then((value) => setDetail(value))
+      .catch((cause) => setDetailError(cause))
+      .finally(() => setDetailLoading(false));
+  };
+  const closeDetail = () => setDetailRunId(undefined);
+
   if (status === 'loading') {
     return <StateView kind="loading" />;
   }
@@ -61,7 +79,7 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
           <dt>{t('curation.lastRun')}</dt>
           <dd data-testid="schedule-last">{formatTime(schedule.last_run_at)}</dd>
           <dt>{t('curation.lastResult')}</dt>
-          <dd data-testid="schedule-status">{`${schedule.last_status}${failing && schedule.last_error ? `: ${schedule.last_error}` : ''}`}</dd>
+          <dd data-testid="schedule-status">{`${tEnum('curation.scheduleStatus', schedule.last_status)}${failing && schedule.last_error ? `: ${schedule.last_error}` : ''}`}</dd>
         </dl>
       ) : (
         <p data-testid="curation-schedule-empty">{t('curation.noSchedule')}</p>
@@ -85,11 +103,15 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
           <tbody>
             {runs.map((run) => (
               <tr key={run.id} data-testid={`analysis-run-${run.id}`}>
-                <td>{run.task_type}</td>
-                <td>{run.trigger}</td>
+                <td>
+                  <button type="button" className="run-link" onClick={() => openDetail(run.id)}>
+                    {tEnum('curation.task', run.task_type)}
+                  </button>
+                </td>
+                <td>{tEnum('curation.trigger', run.trigger)}</td>
                 <td>{run.model || run.provider}</td>
                 <td data-status={run.status}>
-                  {run.status} {run.degraded_reason ? ` (${run.degraded_reason})` : ''}
+                  {tEnum('curation.status', run.status)} {run.degraded_reason ? ` (${tEnum('curation.degraded', run.degraded_reason)})` : ''}
                 </td>
                 <td>{run.candidate_count}</td>
                 <td>{run.tokens_prompt + run.tokens_completion}</td>
@@ -100,6 +122,9 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
           </tbody>
         </table>
       )}
+      {detailRunId ? (
+        <AnalysisRunDetailDialog detail={detail} loading={detailLoading} error={detailError} onClose={closeDetail} />
+      ) : null}
     </section>
   );
 }

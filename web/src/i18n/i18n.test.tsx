@@ -5,12 +5,14 @@ import { LanguageProvider, useI18n } from './index';
 import { LanguageToggle } from './LanguageToggle';
 
 function Probe() {
-  const { t, language } = useI18n();
+  const { t, tEnum, language } = useI18n();
   return (
     <div>
       <span data-testid="language">{language}</span>
       <span data-testid="title">{t('dashboard.title')}</span>
       <span data-testid="interpolated">{t('pagination.status', { page: 2, totalPages: 5, total: 100 })}</span>
+      <span data-testid="enum">{tEnum('curation.task', 'consolidate_memory')}</span>
+      <span data-testid="enum-unknown">{tEnum('curation.task', 'future_task')}</span>
       <LanguageToggle />
     </div>
   );
@@ -49,6 +51,22 @@ describe('i18n', () => {
 
     await user.click(screen.getByTestId('language-toggle'));
     expect(screen.getByTestId('title').textContent).toBe('Dashboard');
+  });
+
+  it('translates known enums and leaves unknown ones as raw values', async () => {
+    const user = userEvent.setup();
+    render(
+      <LanguageProvider initialLanguage="en">
+        <Probe />
+      </LanguageProvider>,
+    );
+    expect(screen.getByTestId('enum').textContent).toBe('Consolidate memory');
+    // An enum without a translation must not leak the namespaced key.
+    expect(screen.getByTestId('enum-unknown').textContent).toBe('future_task');
+
+    await user.click(screen.getByTestId('language-toggle'));
+    expect(screen.getByTestId('enum').textContent).toBe('记忆固化');
+    expect(screen.getByTestId('enum-unknown').textContent).toBe('future_task');
   });
 
   it('restores a persisted language preference', () => {

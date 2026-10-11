@@ -90,6 +90,7 @@ services:
       MEMORY_QUEUE_ADAPTER: nats-core
       MEMORY_SCHEDULER_ADAPTER: internal
       MEMORY_SCHEDULE_DEFAULT_INTERVAL: 24h
+      MEMORY_SESSION_RETENTION: 168h
       MEMORY_CONFIG_MASTER_KEY: ${MEMORY_CONFIG_MASTER_KEY:-mengpo-dev-master-key--32bytes--}
       MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS: "true"
     depends_on:

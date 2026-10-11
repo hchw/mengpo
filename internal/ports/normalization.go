@@ -46,6 +46,10 @@ type PendingAnalysisEvent struct {
 	OccurredAt   time.Time
 	Payload      json.RawMessage
 	Sequence     *int64
+	// Attribution is the source event's assessed link completeness. Evidence
+	// written for a candidate keeps it instead of flattening every claim to
+	// "inferred".
+	Attribution string
 }
 
 // NormalizedEventReader selects normalized events for periodic maintenance. It

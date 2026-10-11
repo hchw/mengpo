@@ -115,6 +115,26 @@ func observeSource(raw string) (obsdomain.SourceType, error) {
 	}
 }
 
+// observeReliability assigns event reliability from what the ingress can verify.
+// Explicit memory instructions and tool-confirmed outcomes are high; every other
+// event stays unknown so it can never auto-promote a candidate through the
+// evidence channel. Attribution only grades linkage completeness, so reliability
+// is the trust signal the promotion policy keys on.
+func observeReliability(source obsdomain.SourceType, messageType string) obsdomain.Reliability {
+	normalized := strings.ToLower(strings.TrimSpace(messageType))
+	switch {
+	case strings.Contains(normalized, "remember"):
+		return obsdomain.ReliabilityHigh
+	case strings.HasPrefix(normalized, "tool."):
+		return obsdomain.ReliabilityHigh
+	case normalized == "turn.outcome":
+		return obsdomain.ReliabilityHigh
+	default:
+		_ = source
+		return obsdomain.ReliabilityUnknown
+	}
+}
+
 type SessionPayload struct {
 	ExternalID string `json:"external_id"`
 	Title      string `json:"title"`
@@ -215,7 +235,7 @@ func (s *Service) Observe(ctx context.Context, envelope dto.Envelope) (any, erro
 		Trace:          trace,
 		OccurredAt:     payload.OccurredAt,
 		Visibility:     visibility,
-		Reliability:    obsdomain.ReliabilityUnknown,
+		Reliability:    observeReliability(source, payload.MessageType),
 		RetentionClass: "standard",
 	}
 	var event obsdomain.Event

@@ -54,6 +54,7 @@ API: http://localhost:8080. NATS monitoring: http://localhost:8222.
 | `MEMORY_MIGRATE_ON_START` | Run platform migrations on startup (default `true`) |
 | `MEMORY_SCHEDULER_ADAPTER` | Periodic scheduler: `internal` (default) or `none` |
 | `MEMORY_SCHEDULE_DEFAULT_INTERVAL` | Default per-tenant schedule cadence (default `24h`) |
+| `MEMORY_SESSION_RETENTION` | How long an idle, activity-free session is kept before `session-cleanup` purges it (default `168h`) |
 | `MEMORY_CONFIG_MASTER_KEY` | 32-byte master key (base64/hex/raw) encrypting per-tenant provider secrets |
 
 All keys use the `MEMORY_` prefix; unprefixed legacy names (for example
@@ -180,6 +181,12 @@ Notes:
   (`tenant_schedules`) with a default daily cadence and can adjust it from the
   console. Multi-replica executions are serialized with a PostgreSQL advisory
   lock, so a trigger runs at most once.
+- **Idle sessions are purged.** The `session-cleanup` plan removes sessions
+  older than `MEMORY_SESSION_RETENTION` that own no event, memory, run or
+  retrieval record. A session row is created eagerly at bind time for ownership
+  and authorization, so this keeps the sessions table (and the console explorer)
+  free of bindings that never produced memory. Every removal is appended to
+  `audit_events` (`action=session.cleanup`, `actor=system`).
 
 ### Deep runtime integration (Level 2 ingress)
 

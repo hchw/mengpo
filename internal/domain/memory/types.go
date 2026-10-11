@@ -80,6 +80,7 @@ const (
 	RelationSupersedes  RelationType = "supersedes"
 	RelationRelated     RelationType = "related"
 	RelationParentOf    RelationType = "parent-of"
+	RelationGeneralizes RelationType = "generalizes"
 )
 
 type Applicability struct {

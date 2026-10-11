@@ -24,6 +24,7 @@ type ConsoleOps struct {
 	Schedules      ScheduleAdmin
 	ScheduleStatus func(ctx context.Context, tenantID string) ([]ports.ScheduleStatus, error)
 	Runs           ports.AnalysisRunStore
+	RunDetails     ports.AnalysisRunDetailReader
 	Audit          ports.AuditWriter
 	Logger         *slog.Logger
 }
@@ -66,6 +67,9 @@ func (c *ConsoleOps) Register(mux *http.ServeMux) {
 	}
 	if c.Runs != nil {
 		mux.HandleFunc("POST /api/v1/analysis-runs", c.handleAnalysisRuns)
+	}
+	if c.RunDetails != nil {
+		mux.HandleFunc("POST /api/v1/analysis-runs/detail", c.handleAnalysisRunDetail)
 	}
 }
 
@@ -153,6 +157,9 @@ func (c *ConsoleOps) handleScheduleStatus(w http.ResponseWriter, r *http.Request
 	}
 	statuses, err := c.ScheduleStatus(r.Context(), scoped.TenantID)
 	if err != nil {
+		if c.Logger != nil {
+			c.Logger.Error("read schedule status failed", slog.String("tenant_id", scoped.TenantID), slog.String("error", err.Error()))
+		}
 		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to read schedule status")
 		return
 	}
@@ -231,31 +238,107 @@ func (c *ConsoleOps) handleAnalysisRuns(w http.ResponseWriter, r *http.Request) 
 		Page: payload.Page, PageSize: payload.PageSize,
 	})
 	if err != nil {
+		if c.Logger != nil {
+			c.Logger.Error("list analysis runs failed", slog.String("tenant_id", scoped.TenantID), slog.String("error", err.Error()))
+		}
 		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to list analysis runs")
 		return
 	}
 	items := make([]map[string]any, 0, len(runs))
 	for _, run := range runs {
-		items = append(items, map[string]any{
-			"id":                run.ID,
-			"task_type":         run.TaskType,
-			"trigger":           run.Trigger,
-			"provider":          run.Provider,
-			"model":             run.Model,
-			"prompt_version":    run.PromptVersion,
-			"status":            run.Status,
-			"latency_ms":        run.LatencyMS,
-			"tokens_prompt":     run.TokensPrompt,
-			"tokens_completion": run.TokensCompletion,
-			"candidate_count":   run.CandidateCount,
-			"discarded_count":   run.DiscardedCount,
-			"conflict_count":    run.ConflictCount,
-			"degraded_reason":   run.DegradedReason,
-			"last_error":        run.LastError,
-			"created_at":        run.CreatedAt.UTC().Format(time.RFC3339),
-		})
+		items = append(items, analysisRunItem(run))
 	}
 	writeAPIData(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// analysisRunItem renders one run for the console. input_count/output_count let
+// the list hint at what a task consumed and produced without loading content.
+func analysisRunItem(run ports.AnalysisRunView) map[string]any {
+	return map[string]any{
+		"id":                run.ID,
+		"task_type":         run.TaskType,
+		"trigger":           run.Trigger,
+		"provider":          run.Provider,
+		"model":             run.Model,
+		"prompt_version":    run.PromptVersion,
+		"status":            run.Status,
+		"latency_ms":        run.LatencyMS,
+		"tokens_prompt":     run.TokensPrompt,
+		"tokens_completion": run.TokensCompletion,
+		"candidate_count":   run.CandidateCount,
+		"discarded_count":   run.DiscardedCount,
+		"conflict_count":    run.ConflictCount,
+		"degraded_reason":   run.DegradedReason,
+		"last_error":        run.LastError,
+		"session_id":        run.SessionID,
+		"input_count":       len(run.InputEventIDs),
+		"output_count":      len(run.OutputMemoryIDs),
+		"created_at":        run.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+type analysisRunDetailPayload struct {
+	ID string `json:"id"`
+}
+
+// handleAnalysisRunDetail returns one run plus previews of the events it read
+// and the memories it wrote, so an operator can see what a task actually did.
+func (c *ConsoleOps) handleAnalysisRunDetail(w http.ResponseWriter, r *http.Request) {
+	envelope, scoped, err := bindConsoleRequest(r)
+	if err != nil {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	var payload analysisRunDetailPayload
+	if len(envelope.Payload) > 0 {
+		_ = json.Unmarshal(envelope.Payload, &payload)
+	}
+	if payload.ID == "" {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "analysis run id is required")
+		return
+	}
+	detail, found, err := c.RunDetails.GetAnalysisRunDetail(r.Context(), scoped.TenantID, payload.ID, 50)
+	if err != nil {
+		if c.Logger != nil {
+			c.Logger.Error("read analysis run detail failed", slog.String("tenant_id", scoped.TenantID), slog.String("run_id", payload.ID), slog.String("error", err.Error()))
+		}
+		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to read analysis run detail")
+		return
+	}
+	if !found {
+		writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "analysis run not found")
+		return
+	}
+	inputs := make([]map[string]any, 0, len(detail.Inputs))
+	for _, input := range detail.Inputs {
+		inputs = append(inputs, map[string]any{
+			"id":           input.ID,
+			"source_type":  input.SourceType,
+			"message_type": input.MessageType,
+			"session_id":   input.SessionID,
+			"occurred_at":  input.OccurredAt.UTC().Format(time.RFC3339),
+			"payload":      input.Payload,
+		})
+	}
+	outputs := make([]map[string]any, 0, len(detail.Outputs))
+	for _, output := range detail.Outputs {
+		outputs = append(outputs, map[string]any{
+			"id":           output.ID,
+			"status":       output.Status,
+			"memory_type":  output.MemoryType,
+			"scope_type":   output.ScopeType,
+			"confidence":   output.Confidence,
+			"content_text": output.ContentText,
+			"created_at":   output.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeAPIData(w, http.StatusOK, map[string]any{
+		"run":       analysisRunItem(detail.Run),
+		"result":    detail.Run.Result,
+		"inputs":    inputs,
+		"outputs":   outputs,
+		"truncated": detail.Truncated,
+	})
 }
 
 func (c *ConsoleOps) recordAudit(r *http.Request, scoped agentaccess.Scoped, requestID, action, resourceType, resourceID string, changes map[string]any) {

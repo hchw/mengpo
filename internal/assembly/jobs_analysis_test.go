@@ -160,6 +160,7 @@ func TestGatedEventPersistsCandidateWithEvidence(t *testing.T) {
 		MessageType: "message",
 		Payload:     json.RawMessage(`{"status":"error","text":"migration failed"}`),
 		OccurredAt:  time.Now().UTC(),
+		Attribution: observation.Attribution{Level: observation.AttributionDirect},
 	}
 	analyst := &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
 		CandidateID:      "c1",
@@ -199,6 +200,9 @@ func TestGatedEventPersistsCandidateWithEvidence(t *testing.T) {
 	}
 	if len(record.Evidence) != 1 || record.Evidence[0].RawEventID != event.ID {
 		t.Fatalf("candidate evidence = %#v", record.Evidence)
+	}
+	if record.Evidence[0].Attribution != "direct" {
+		t.Fatalf("evidence attribution = %q, want the source event's direct attribution", record.Evidence[0].Attribution)
 	}
 	if len(record.Node.Provenance) == 0 {
 		t.Fatal("candidate must carry provenance")

@@ -180,6 +180,7 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 		Governance: governance.NewService(memoryRepository),
 		Members:    identityRepo,
 		Agents:     postgres.NewAgentRepository(db),
+		Triage:     postgres.NewTriageRepository(router),
 	}
 	providerService, err := NewProviderService(cfg, router, newProviderAnalystBuilder(cfg))
 	if err != nil {
@@ -191,9 +192,10 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 		ScheduleStatus: func(ctx context.Context, tenantID string) ([]ports.ScheduleStatus, error) {
 			return postgres.NewTenantScheduleStore(db).List(ctx, tenantID)
 		},
-		Runs:   postgres.NewAnalystRunRepository(router),
-		Audit:  postgres.NewAuditRepository(router),
-		Logger: logger,
+		Runs:       postgres.NewAnalystRunRepository(router),
+		RunDetails: postgres.NewAnalystRunRepository(router),
+		Audit:      postgres.NewAuditRepository(router),
+		Logger:     logger,
 	}
 	return &Server{
 		cfg:     cfg,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +79,16 @@ VALUES ($1, 'normalize_event', $2, 'run-record-1', 'queued')`, jobID, tenant.ID)
 	}
 	if inserted {
 		t.Fatal("replay StartAnalysisRun inserted a duplicate record")
+	}
+
+	// A run that is still in flight has a NULL result column; listing must
+	// tolerate it rather than failing the whole page with a scan error.
+	inFlight, err := repository.ListAnalysisRuns(ctx, tenant.ID, ports.AnalysisRunFilter{})
+	if err != nil {
+		t.Fatalf("ListAnalysisRuns(in-flight) error = %v", err)
+	}
+	if len(inFlight) != 1 || string(inFlight[0].Result) != "null" {
+		t.Fatalf("in-flight run result = %q, want json null", inFlight[0].Result)
 	}
 
 	updated, err := repository.FinishAnalysisRun(ctx, tenant.ID, jobID, ports.AnalysisRunUpdate{
@@ -184,5 +195,87 @@ func TestMaintenanceCursorRoundTrip(t *testing.T) {
 	watermark, err := repository.LoadMaintenanceCursor(ctx, tenant.ID, "consolidate")
 	if err != nil || watermark != 5 {
 		t.Fatalf("cursor = %d err=%v, want 5", watermark, err)
+	}
+}
+
+func TestAnalysisRunDetailIncludesInputsAndOutputs(t *testing.T) {
+	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set MEMORY_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.ApplyPlatformMigrations(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	store := registry.NewStore(db)
+	tenant := createMigratedTenant(t, ctx, db, store, "analysis run detail")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, tenant.ID)
+	})
+	router := tenantdb.NewRouter(db, store)
+	repository := NewAnalystRunRepository(router)
+
+	const userID = "00000000-0000-4000-8000-0000000000a1"
+	const sessionID = "00000000-0000-4000-8000-0000000000a2"
+	const eventID = "00000000-0000-4000-8000-0000000000a3"
+	const memoryID = "00000000-0000-4000-8000-0000000000a4"
+	const runID = "00000000-0000-4000-8000-0000000000a5"
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status, title) VALUES ($1::uuid, $2::uuid, 'active', 'detail')`, sessionID, userID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO observed_events (id, idempotency_key, session_id, source_type, source_id, message_type, payload, occurred_at, retention_class)
+			VALUES ($1::uuid, 'detail-event', $2::uuid, 'tool', 'src', 'tool.failure', '{"stderr":"boom"}'::jsonb, now(), 'standard')`, eventID, sessionID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO memory_nodes (id, idempotency_key, user_id, scope_type, scope_id, memory_type, status, visibility, confidence, content, content_text, default_retrieval, version, provenance)
+			VALUES ($1::uuid, 'detail-memory', $2::uuid, 'user-global', $2::uuid, 'insight', 'candidate', 'private', 0.6, '{"summary":"boom on retry"}'::jsonb, '', false, 1, '{}'::jsonb)`, memoryID, userID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed detail fixtures: %v", err)
+	}
+
+	record := ports.AnalysisRunRecord{
+		ID: "00000000-0000-4000-8000-0000000000a6", RunID: runID, TaskType: "analyze_failure",
+		Trigger: ports.TriggerEvent, InputEventIDs: []string{eventID}, Status: ports.AnalysisRunRunning,
+	}
+	if _, err := repository.StartAnalysisRun(ctx, tenant.ID, record); err != nil {
+		t.Fatalf("StartAnalysisRun() error = %v", err)
+	}
+	if _, err := repository.FinishAnalysisRun(ctx, tenant.ID, runID, ports.AnalysisRunUpdate{
+		Status: ports.AnalysisRunSucceeded, CandidateCount: 1, OutputMemoryIDs: []string{memoryID},
+	}); err != nil {
+		t.Fatalf("FinishAnalysisRun() error = %v", err)
+	}
+
+	detail, found, err := repository.GetAnalysisRunDetail(ctx, tenant.ID, record.ID, 50)
+	if err != nil || !found {
+		t.Fatalf("GetAnalysisRunDetail() found=%v err=%v", found, err)
+	}
+	if detail.Run.TaskType != "analyze_failure" || len(detail.Run.OutputMemoryIDs) != 1 {
+		t.Fatalf("detail run = %#v", detail.Run)
+	}
+	if len(detail.Inputs) != 1 || detail.Inputs[0].MessageType != "tool.failure" || detail.Inputs[0].Payload == "" {
+		t.Fatalf("detail inputs = %#v", detail.Inputs)
+	}
+	if len(detail.Outputs) != 1 || detail.Outputs[0].ID != memoryID || detail.Outputs[0].Status != "candidate" || !strings.Contains(detail.Outputs[0].ContentText, "boom on retry") {
+		t.Fatalf("detail outputs = %#v", detail.Outputs)
+	}
+	if detail.Truncated {
+		t.Fatal("detail unexpectedly reported truncation")
+	}
+
+	if _, found, err := repository.GetAnalysisRunDetail(ctx, tenant.ID, "00000000-0000-4000-8000-0000000000ff", 50); err != nil || found {
+		t.Fatalf("unknown run found=%v err=%v", found, err)
 	}
 }

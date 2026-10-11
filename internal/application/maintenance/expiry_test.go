@@ -16,13 +16,15 @@ func (f fakeDueReader) ListDueMemories(context.Context, string, int) ([]ports.Me
 }
 
 type fakeGovernance struct {
-	applied []string
-	actions []memory.GovernanceAction
+	applied  []string
+	actions  []memory.GovernanceAction
+	commands []memory.GovernanceCommand
 }
 
 func (f *fakeGovernance) Apply(_ context.Context, _ string, memoryID string, command memory.GovernanceCommand) (memory.GovernanceMutation, error) {
 	f.applied = append(f.applied, memoryID)
 	f.actions = append(f.actions, command.Action)
+	f.commands = append(f.commands, command)
 	return memory.GovernanceMutation{}, nil
 }
 

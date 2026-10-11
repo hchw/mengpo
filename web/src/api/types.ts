@@ -78,6 +78,13 @@ export interface MemoryRecord {
 export interface CandidateRecord extends MemoryRecord {
   proposed_by: string;
   evidence_ids: string[];
+  provider?: string;
+  model?: string;
+  prompt_version?: string;
+  triage_group?: string;
+  triage_conflicts?: string[];
+  triage_priority?: number;
+  triage_rationale?: string;
 }
 
 export interface RankingReason {
@@ -153,7 +160,13 @@ export interface ProviderTestResult { ok: boolean; latency_ms: number; error: st
 }
 export interface ScheduleStatus { name: string; cadence_seconds: number; next_run_at: string; last_run_at: string; last_status: string; last_error: string; runs: number;
 }
-export interface AnalysisRun { id: string; task_type: string; trigger: string; provider: string; model: string; prompt_version: string; status: string; latency_ms: number; tokens_prompt: number; tokens_completion: number; candidate_count: number; discarded_count: number; conflict_count: number; degraded_reason: string; last_error: string; created_at: string;
+export interface AnalysisRun { id: string; task_type: string; trigger: string; provider: string; model: string; prompt_version: string; status: string; latency_ms: number; tokens_prompt: number; tokens_completion: number; candidate_count: number; discarded_count: number; conflict_count: number; degraded_reason: string; last_error: string; session_id: string; input_count: number; output_count: number; created_at: string;
+}
+export interface AnalysisRunInput { id: string; source_type: string; message_type: string; session_id: string; occurred_at: string; payload: string;
+}
+export interface AnalysisRunOutput { id: string; status: string; memory_type: string; scope_type: string; confidence: number; content_text: string; created_at: string;
+}
+export interface AnalysisRunDetail { run: AnalysisRun; result: unknown; inputs: AnalysisRunInput[]; outputs: AnalysisRunOutput[]; truncated: boolean;
 }
 export interface ScheduleUpdate { name: string; cadence_seconds: number; enabled: boolean;
 }

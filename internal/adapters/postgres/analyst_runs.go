@@ -137,6 +137,42 @@ func outputIDsJSON(ids []string) []byte {
 	return encoded
 }
 
+// analysisRunColumns is the column list shared by the list and detail reads. It
+// coalesces every nullable text/JSON column so a sparse run never fails a scan.
+const analysisRunColumns = `id, COALESCE(correlation_id, outbox_job_id::text, ''), COALESCE(session_id::text, ''), task_type,
+	COALESCE(trigger_source, 'event'), COALESCE(provider, ''), COALESCE(model, ''), COALESCE(prompt_version, ''),
+	COALESCE(schema_version, ''), input_watermark, COALESCE(input_event_ids, '[]'::jsonb), priority, status, attempts,
+	COALESCE(last_error, ''), latency_ms, tokens_prompt, tokens_completion, COALESCE(cost_usd, 0),
+	candidate_count, discarded_count, conflict_count, COALESCE(degraded_reason, ''), created_at, updated_at,
+	COALESCE(produced_memory_ids, '[]'::jsonb), COALESCE(result, 'null'::jsonb)`
+
+// scanAnalysisRun decodes one analysis_jobs row selected with analysisRunColumns.
+func scanAnalysisRun(row rowScanner) (ports.AnalysisRunView, error) {
+	var view ports.AnalysisRunView
+	var sessionID, lastError string
+	var watermark *int64
+	var inputEvents, outputEvents []byte
+	if err := row.Scan(
+		&view.ID, &view.RunID, &sessionID, &view.TaskType, &view.Trigger, &view.Provider, &view.Model,
+		&view.PromptVersion, &view.SchemaVersion, &watermark, &inputEvents, &view.Priority, &view.Status,
+		&view.Attempts, &lastError, &view.LatencyMS, &view.TokensPrompt, &view.TokensCompletion, &view.CostUSD,
+		&view.CandidateCount, &view.DiscardedCount, &view.ConflictCount, &view.DegradedReason, &view.CreatedAt, &view.UpdatedAt,
+		&outputEvents, &view.Result,
+	); err != nil {
+		return view, err
+	}
+	view.SessionID = sessionID
+	view.LastError = lastError
+	view.InputWatermark = watermark
+	if len(inputEvents) > 0 {
+		_ = json.Unmarshal(inputEvents, &view.InputEventIDs)
+	}
+	if len(outputEvents) > 0 {
+		_ = json.Unmarshal(outputEvents, &view.OutputMemoryIDs)
+	}
+	return view, nil
+}
+
 func (r *AnalystRunRepository) ListAnalysisRuns(ctx context.Context, tenantID string, filter ports.AnalysisRunFilter) ([]ports.AnalysisRunView, error) {
 	pageSize := filter.PageSize
 	if pageSize <= 0 || pageSize > 200 {
@@ -167,10 +203,7 @@ func (r *AnalystRunRepository) ListAnalysisRuns(ctx context.Context, tenantID st
 	if filter.Until != nil {
 		add("created_at < $%d", filter.Until.UTC())
 	}
-	query := `SELECT id, COALESCE(correlation_id, outbox_job_id::text, ''), COALESCE(session_id::text, ''), task_type, COALESCE(trigger_source, 'event'), provider, model,
-	prompt_version, schema_version, input_watermark, COALESCE(input_event_ids, '[]'::jsonb), priority, status, attempts, last_error,
-	latency_ms, tokens_prompt, tokens_completion, cost_usd, candidate_count, discarded_count, conflict_count, degraded_reason, created_at, updated_at, result
-	FROM analysis_jobs`
+	query := `SELECT ` + analysisRunColumns + ` FROM analysis_jobs`
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
@@ -185,23 +218,9 @@ func (r *AnalystRunRepository) ListAnalysisRuns(ctx context.Context, tenantID st
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var view ports.AnalysisRunView
-			var sessionID, lastError string
-			var watermark *int64
-			var inputEvents []byte
-			if err := rows.Scan(
-				&view.ID, &view.RunID, &sessionID, &view.TaskType, &view.Trigger, &view.Provider, &view.Model,
-				&view.PromptVersion, &view.SchemaVersion, &watermark, &inputEvents, &view.Priority, &view.Status,
-				&view.Attempts, &lastError, &view.LatencyMS, &view.TokensPrompt, &view.TokensCompletion, &view.CostUSD,
-				&view.CandidateCount, &view.DiscardedCount, &view.ConflictCount, &view.DegradedReason, &view.CreatedAt, &view.UpdatedAt, &view.Result,
-			); err != nil {
+			view, err := scanAnalysisRun(rows)
+			if err != nil {
 				return err
-			}
-			view.SessionID = sessionID
-			view.LastError = lastError
-			view.InputWatermark = watermark
-			if len(inputEvents) > 0 {
-				_ = json.Unmarshal(inputEvents, &view.InputEventIDs)
 			}
 			views = append(views, view)
 		}
@@ -211,6 +230,99 @@ func (r *AnalystRunRepository) ListAnalysisRuns(ctx context.Context, tenantID st
 		return nil, err
 	}
 	return views, nil
+}
+
+// GetAnalysisRunDetail loads one run and the content behind its inputs and
+// outputs. Inputs are the observed events the run consumed; outputs are the
+// memory nodes it produced. Missing, deleted, or cross-scope rows are simply
+// absent rather than an error, so a purged memory never breaks the audit view.
+func (r *AnalystRunRepository) GetAnalysisRunDetail(ctx context.Context, tenantID, runID string, limit int) (ports.AnalysisRunDetail, bool, error) {
+	if runID == "" {
+		return ports.AnalysisRunDetail{}, false, errors.New("analysis run id is required")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var detail ports.AnalysisRunDetail
+	found := false
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		run, err := scanAnalysisRun(tx.QueryRowContext(ctx, `SELECT `+analysisRunColumns+` FROM analysis_jobs WHERE id = $1::uuid`, runID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("load analysis run: %w", err)
+		}
+		found = true
+		detail.Run = run
+
+		if len(run.InputEventIDs) > 0 {
+			inputs, err := loadRunInputs(ctx, tx, run.InputEventIDs, limit)
+			if err != nil {
+				return err
+			}
+			detail.Inputs = inputs
+		}
+		if len(run.OutputMemoryIDs) > 0 {
+			outputs, err := loadRunOutputs(ctx, tx, run.OutputMemoryIDs, limit)
+			if err != nil {
+				return err
+			}
+			detail.Outputs = outputs
+		}
+		detail.Truncated = len(detail.Inputs) >= limit || len(detail.Outputs) >= limit
+		return nil
+	})
+	if err != nil {
+		return ports.AnalysisRunDetail{}, false, err
+	}
+	return detail, found, nil
+}
+
+func loadRunInputs(ctx context.Context, tx *sql.Tx, ids []string, limit int) ([]ports.AnalysisRunInput, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, COALESCE(source_type, ''), COALESCE(message_type, ''), COALESCE(session_id::text, ''), occurred_at,
+			left(COALESCE(payload::text, 'null'), 2000)
+		FROM observed_events
+		WHERE id = ANY($1::uuid[])
+		ORDER BY occurred_at
+		LIMIT $2`, uuidArrayLiteral(ids), limit)
+	if err != nil {
+		return nil, fmt.Errorf("load analysis run inputs: %w", err)
+	}
+	defer rows.Close()
+	inputs := make([]ports.AnalysisRunInput, 0, len(ids))
+	for rows.Next() {
+		var input ports.AnalysisRunInput
+		if err := rows.Scan(&input.ID, &input.SourceType, &input.MessageType, &input.SessionID, &input.OccurredAt, &input.Payload); err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, input)
+	}
+	return inputs, rows.Err()
+}
+
+func loadRunOutputs(ctx context.Context, tx *sql.Tx, ids []string, limit int) ([]ports.AnalysisRunOutput, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id::text, COALESCE(status, ''), COALESCE(memory_type, ''), COALESCE(scope_type, ''), COALESCE(confidence, 0),
+			left(COALESCE(NULLIF(content_text, ''), content::text, ''), 2000), created_at
+		FROM memory_nodes
+		WHERE id = ANY($1::uuid[])
+		ORDER BY created_at
+		LIMIT $2`, uuidArrayLiteral(ids), limit)
+	if err != nil {
+		return nil, fmt.Errorf("load analysis run outputs: %w", err)
+	}
+	defer rows.Close()
+	outputs := make([]ports.AnalysisRunOutput, 0, len(ids))
+	for rows.Next() {
+		var output ports.AnalysisRunOutput
+		if err := rows.Scan(&output.ID, &output.Status, &output.MemoryType, &output.ScopeType, &output.Confidence, &output.ContentText, &output.CreatedAt); err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, output)
+	}
+	return outputs, rows.Err()
 }
 
 // LoadMaintenanceCursor returns the watermark for a tenant task, defaulting to 0.

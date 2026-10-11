@@ -88,6 +88,11 @@ type AnalysisConfig struct {
 type SchedulerConfig struct {
 	Adapter         string
 	DefaultInterval time.Duration
+	// SessionRetention is how long an idle, activity-free session may live
+	// before the cleanup plan removes it. Sessions are bound eagerly for
+	// ownership, so a session that never produced an event or memory is safe to
+	// purge once it is older than this window.
+	SessionRetention time.Duration
 }
 
 type EmbeddingConfig struct {
@@ -183,8 +188,9 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 			MaintenanceBatchSize: 50,
 		},
 		Scheduler: SchedulerConfig{
-			Adapter:         "internal",
-			DefaultInterval: 24 * time.Hour,
+			Adapter:          "internal",
+			DefaultInterval:  24 * time.Hour,
+			SessionRetention: 7 * 24 * time.Hour,
 		},
 		MasterKey: strings.TrimSpace(envString(lookup, envNames("MEMORY_CONFIG_MASTER_KEY"), "")),
 	}
@@ -234,6 +240,9 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	cfg.Analysis.MaintenanceBatchSize = int(maintenanceBatch)
 	cfg.Scheduler.Adapter = envString(lookup, envNames("MEMORY_SCHEDULER_ADAPTER"), cfg.Scheduler.Adapter)
 	if cfg.Scheduler.DefaultInterval, err = envDuration(lookup, envNames("MEMORY_SCHEDULE_DEFAULT_INTERVAL"), cfg.Scheduler.DefaultInterval); err != nil {
+		return Config{}, err
+	}
+	if cfg.Scheduler.SessionRetention, err = envDuration(lookup, envNames("MEMORY_SESSION_RETENTION", "SESSION_RETENTION"), cfg.Scheduler.SessionRetention); err != nil {
 		return Config{}, err
 	}
 	if cfg.Security.AllowExternalLLMAnalysis, err = envBool(lookup, envNames("MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS", "ALLOW_EXTERNAL_LLM_ANALYSIS"), false); err != nil {
@@ -304,6 +313,9 @@ func (c Config) Validate() error {
 	if c.Scheduler.DefaultInterval <= 0 {
 		return errors.New("MEMORY_SCHEDULE_DEFAULT_INTERVAL must be positive")
 	}
+	if c.Scheduler.SessionRetention <= 0 {
+		return errors.New("MEMORY_SESSION_RETENTION must be positive")
+	}
 	if c.Queue.Adapter != "nats-core" && c.Queue.Adapter != "none" {
 		return fmt.Errorf("unsupported MEMORY_QUEUE_ADAPTER/MQ_ADAPTER %q", c.Queue.Adapter)
 	}
@@ -339,6 +351,7 @@ func EnvNames() map[string][]string {
 		"maintenance_batch_size":    envNames("MEMORY_MAINTENANCE_BATCH_SIZE"),
 		"scheduler_adapter":         envNames("MEMORY_SCHEDULER_ADAPTER"),
 		"schedule_default_interval": envNames("MEMORY_SCHEDULE_DEFAULT_INTERVAL"),
+		"session_retention":         envNames("MEMORY_SESSION_RETENTION", "SESSION_RETENTION"),
 		"config_master_key":         envNames("MEMORY_CONFIG_MASTER_KEY"),
 		"embedding_enabled":         envNames("MEMORY_EMBEDDING_ENABLED", "EMBEDDING_ENABLED"),
 		"embedding_artifact":        envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"),

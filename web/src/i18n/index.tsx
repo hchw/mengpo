@@ -109,6 +109,10 @@ export const dictionaries = {
     'review.action.merge': 'merge',
     'review.action.expire': 'expire',
     'review.action.delete': 'delete',
+    'review.proposedBy': 'proposed by',
+    'review.evidence': 'evidence',
+    'review.triage': 'triage',
+    'review.conflicts': 'conflicts',
 
     // Projection debugger
     'debugger.title': 'Projection Debugger',
@@ -213,6 +217,43 @@ export const dictionaries = {
     'curation.tokens': 'Tokens',
     'curation.latency': 'Latency',
     'curation.when': 'When',
+  // Curation machine values: backend enums rendered as labels. They live under
+  // their own namespace so a raw value falls back to itself, never to a key.
+  'curation.task.classify_event': 'Classify event',
+  'curation.task.analyze_failure': 'Analyze failure',
+  'curation.task.consolidate_memory': 'Consolidate memory',
+  'curation.task.analyze_conflict': 'Analyze conflict',
+  'curation.task.propose_transfer': 'Propose transfer',
+  'curation.task.dedupe_scan': 'Dedupe scan',
+  'curation.task.retry_cleanup': 'Retry cleanup',
+  'curation.task.evaluate_feedback': 'Evaluate feedback',
+  'curation.task.candidate_promotion': 'Candidate promotion',
+  'curation.task.candidate_triage': 'Candidate triage',
+  'curation.trigger.event': 'Event',
+  'curation.trigger.schedule': 'Schedule',
+  'curation.trigger.explicit': 'Explicit',
+  'curation.status.running': 'Running',
+  'curation.status.succeeded': 'Succeeded',
+  'curation.status.failed': 'Failed',
+  'curation.status.dead_letter': 'Dead letter',
+  'curation.status.cancelled': 'Cancelled',
+  'curation.degraded.primary_timeout': 'primary timeout',
+  'curation.degraded.rules_only': 'rules only',
+  'curation.scheduleStatus.ok': 'ok',
+  'curation.scheduleStatus.error': 'error',
+  'curation.scheduleStatus.pending': 'pending',
+  'curation.promptVersion': 'Prompt version',
+  'curation.session': 'Session',
+  'curation.confidence': 'confidence {value}',
+  'curation.detail.title': 'Task detail',
+  'curation.detail.close': 'Close',
+  'curation.detail.result': 'Structured result',
+  'curation.detail.noResult': 'This task recorded no structured result.',
+  'curation.detail.inputs': 'Source events',
+  'curation.detail.noInputs': 'No source events were recorded for this task.',
+  'curation.detail.outputs': 'Produced memories',
+  'curation.detail.noOutputs': 'No memories were linked to this task.',
+  'curation.detail.truncated': 'Only the first 50 items of each side are shown.',
 
     // Error boundary
     'error.title': 'Something went wrong',
@@ -309,6 +350,10 @@ export const dictionaries = {
     'review.action.merge': '合并',
     'review.action.expire': '过期',
     'review.action.delete': '删除',
+    'review.proposedBy': '提出者',
+    'review.evidence': '证据',
+    'review.triage': '分诊',
+    'review.conflicts': '冲突',
 
     'debugger.title': '投影调试',
     'debugger.query': '查询',
@@ -407,6 +452,41 @@ export const dictionaries = {
     'curation.tokens': 'Tokens',
     'curation.latency': '延迟',
     'curation.when': '时间',
+  'curation.task.classify_event': '事件分类',
+  'curation.task.analyze_failure': '失败分析',
+  'curation.task.consolidate_memory': '记忆固化',
+  'curation.task.analyze_conflict': '冲突分析',
+  'curation.task.propose_transfer': '迁移建议',
+  'curation.task.dedupe_scan': '去重扫描',
+  'curation.task.retry_cleanup': '重试清理',
+  'curation.task.evaluate_feedback': '反馈评估',
+  'curation.task.candidate_promotion': '候选晋升',
+  'curation.task.candidate_triage': '候选分诊',
+  'curation.trigger.event': '事件',
+  'curation.trigger.schedule': '计划',
+  'curation.trigger.explicit': '显式',
+  'curation.status.running': '运行中',
+  'curation.status.succeeded': '成功',
+  'curation.status.failed': '失败',
+  'curation.status.dead_letter': '死信',
+  'curation.status.cancelled': '已取消',
+  'curation.degraded.primary_timeout': '主模型超时',
+  'curation.degraded.rules_only': '仅规则',
+  'curation.scheduleStatus.ok': '正常',
+  'curation.scheduleStatus.error': '错误',
+  'curation.scheduleStatus.pending': '待运行',
+  'curation.promptVersion': '提示词版本',
+  'curation.session': '会话',
+  'curation.confidence': '置信度 {value}',
+  'curation.detail.title': '任务详情',
+  'curation.detail.close': '关闭',
+  'curation.detail.result': '结构化结果',
+  'curation.detail.noResult': '该任务没有记录结构化结果。',
+  'curation.detail.inputs': '数据源事件',
+  'curation.detail.noInputs': '该任务没有记录数据源事件。',
+  'curation.detail.outputs': '产出记忆',
+  'curation.detail.noOutputs': '该任务没有关联产出记忆。',
+  'curation.detail.truncated': '每侧仅展示前 50 条。',
 
     'error.title': '出错了',
     'error.retry': '重试',
@@ -429,11 +509,25 @@ export interface I18nValue {
   setLanguage: (language: Language) => void;
   toggle: () => void;
   t: (key: string, vars?: Record<string, string | number>) => string;
+  tEnum: (prefix: string, value: string) => string;
 }
 
 function lookup(language: Language, key: string): string {
   const catalog = dictionaries[language] as Record<string, string>;
   return catalog[key] ?? (dictionaries.en as Record<string, string>)[key] ?? key;
+}
+
+// enumLookup translates a machine value (a backend enum such as a task or run
+// status) through the catalog. Unlike `t`, an unknown value falls back to the
+// raw wire value rather than the namespaced key, so operators still see
+// something meaningful when a new enum arrives before its translation.
+function enumLookup(language: Language, prefix: string, value: string): string {
+  if (!value) {
+    return '';
+  }
+  const key = `${prefix}.${value}`;
+  const catalog = dictionaries[language] as Record<string, string>;
+  return catalog[key] ?? (dictionaries.en as Record<string, string>)[key] ?? value;
 }
 
 function detectLanguage(): Language {
@@ -456,6 +550,7 @@ const fallback: I18nValue = {
   setLanguage: () => {},
   toggle: () => {},
   t: (key, vars) => interpolate(lookup('en', key), vars),
+  tEnum: (prefix, value) => enumLookup('en', prefix, value),
 };
 
 const I18nContext = createContext<I18nValue>(fallback);
@@ -486,6 +581,7 @@ export function LanguageProvider({ children, initialLanguage }: LanguageProvider
       setLanguage,
       toggle,
       t: (key, vars) => interpolate(lookup(language, key), vars),
+      tEnum: (prefix, value) => enumLookup(language, prefix, value),
     }),
     [language, setLanguage, toggle],
   );

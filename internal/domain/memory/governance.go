@@ -12,8 +12,13 @@ type GovernancePolicy struct {
 	MinimumActivationConfidence float64
 	MinimumStableConfidence     float64
 	MinimumIndependentSessions  int
-	ReliabilityWeights          map[EvidenceReliability]float64
-	AttributionWeights          map[Attribution]float64
+	// MinimumRecurrenceSessions is the number of independent source sessions
+	// that may activate a candidate through corroboration alone. Recurrence
+	// grants recall (active) but never stable: a repeated inference is still an
+	// inference until a well-linked observation corroborates it.
+	MinimumRecurrenceSessions int
+	ReliabilityWeights        map[EvidenceReliability]float64
+	AttributionWeights        map[Attribution]float64
 }
 
 func DefaultGovernancePolicy() GovernancePolicy {
@@ -22,6 +27,7 @@ func DefaultGovernancePolicy() GovernancePolicy {
 		MinimumActivationConfidence: 0.65,
 		MinimumStableConfidence:     0.90,
 		MinimumIndependentSessions:  2,
+		MinimumRecurrenceSessions:   3,
 		ReliabilityWeights: map[EvidenceReliability]float64{
 			ReliabilityHigh: 1, ReliabilityMedium: 0.75, ReliabilityLow: 0.4, ReliabilityUnknown: 0.2,
 		},
@@ -48,7 +54,8 @@ type GovernanceDecision struct {
 
 func (p GovernancePolicy) Validate() error {
 	if p.Version == "" || !finiteUnitInterval(p.MinimumActivationConfidence) || !finiteUnitInterval(p.MinimumStableConfidence) ||
-		p.MinimumStableConfidence < p.MinimumActivationConfidence || p.MinimumIndependentSessions < 2 {
+		p.MinimumStableConfidence < p.MinimumActivationConfidence || p.MinimumIndependentSessions < 2 ||
+		p.MinimumRecurrenceSessions < 2 {
 		return ErrInvalidGovernanceInput
 	}
 	for _, reliability := range []EvidenceReliability{ReliabilityHigh, ReliabilityMedium, ReliabilityLow, ReliabilityUnknown} {
@@ -136,6 +143,19 @@ func EvaluateGovernance(memory Memory, input GovernanceInput, policy GovernanceP
 		decision.Reason = "verified_direct_evidence"
 		return decision, nil
 	}
+	// Recurrence channel: the same claim recurs across enough independent
+	// sessions to be more than a one-off inference. Individual events may be
+	// weakly linked (e.g. tool results, which carry no outcome pair) but their
+	// reliability is high; independence is the signal. It grants recall (active)
+	// but never stable, which still needs a well-linked observation.
+	if decision.Memory.Status == StatusCandidate && independentSessions >= policy.MinimumRecurrenceSessions && confidence >= policy.MinimumActivationConfidence {
+		if err := decision.Memory.Transition(StatusActive); err != nil {
+			return GovernanceDecision{}, err
+		}
+		decision.Memory.DefaultRetrieval = true
+		decision.Reason = "independent_session_recurrence"
+		return decision, nil
+	}
 	if decision.Memory.Status == StatusActive && hasHighDirectEvidence && confidence >= policy.MinimumStableConfidence && independentSessions >= policy.MinimumIndependentSessions {
 		if err := decision.Memory.Transition(StatusStable); err != nil {
 			return GovernanceDecision{}, err
@@ -155,9 +175,10 @@ func EvaluateGovernance(memory Memory, input GovernanceInput, policy GovernanceP
 
 func evidenceConfidence(memoryID string, evidence []Evidence, policy GovernancePolicy) (float64, int, int, bool, error) {
 	type eventEvidence struct {
-		score      float64
-		highDirect bool
-		sessionID  string
+		score           float64
+		highDirect      bool
+		highReliability bool
+		sessionID       string
 	}
 	byEvent := make(map[string]eventEvidence, len(evidence))
 	for _, item := range evidence {
@@ -171,9 +192,10 @@ func evidenceConfidence(memoryID string, evidence []Evidence, policy GovernanceP
 		}
 		score := item.Confidence * reliabilityWeight * attributionWeight
 		highDirect := item.Reliability == ReliabilityHigh && item.Attribution == AttributionDirect
+		highReliability := item.Reliability == ReliabilityHigh
 		previous, exists := byEvent[item.RawEventID]
 		if !exists {
-			byEvent[item.RawEventID] = eventEvidence{score: score, highDirect: highDirect, sessionID: item.SourceSessionID}
+			byEvent[item.RawEventID] = eventEvidence{score: score, highDirect: highDirect, highReliability: highReliability, sessionID: item.SourceSessionID}
 			continue
 		}
 		if highDirect && previous.highDirect && previous.sessionID != "" && item.SourceSessionID != "" && previous.sessionID != item.SourceSessionID {
@@ -184,9 +206,12 @@ func evidenceConfidence(memoryID string, evidence []Evidence, policy GovernanceP
 		}
 		if highDirect {
 			previous.highDirect = true
-			if item.SourceSessionID != "" {
-				previous.sessionID = item.SourceSessionID
-			}
+		}
+		if highReliability {
+			previous.highReliability = true
+		}
+		if item.SourceSessionID != "" && (highDirect || highReliability) {
+			previous.sessionID = item.SourceSessionID
 		}
 		byEvent[item.RawEventID] = previous
 	}
@@ -197,9 +222,12 @@ func evidenceConfidence(memoryID string, evidence []Evidence, policy GovernanceP
 		remaining *= 1 - item.score
 		if item.highDirect {
 			hasHighDirect = true
-			if item.sessionID != "" {
-				independentSessions[item.sessionID] = struct{}{}
-			}
+		}
+		// Independence counts every high-reliability source session, not only
+		// the fully-linked ones, so recurrence across sessions is observable
+		// even when each event is only loosely linked.
+		if item.highReliability && item.sessionID != "" {
+			independentSessions[item.sessionID] = struct{}{}
 		}
 	}
 	return 1 - remaining, len(byEvent), len(independentSessions), hasHighDirect, nil

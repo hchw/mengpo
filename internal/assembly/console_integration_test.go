@@ -143,6 +143,26 @@ func TestConsoleEndpoints(t *testing.T) {
 		t.Fatalf("reject status=%s err=%v", node.Status, err)
 	}
 
+	// confirm promotes through governance and is audited like any other action.
+	confirmID := "00000000-0000-4000-8000-0000000c0a06"
+	if _, err := memories.Create(ctx, tenant.ID, ports.MemoryNodeRecord{
+		ID: confirmID, IdempotencyKey: "console-confirm", UserID: userID, ScopeType: "user-global", ScopeID: userID,
+		MemoryType: "fact", Status: "candidate", Confidence: 0.5, DefaultRetrieval: false,
+		Content: json.RawMessage(`{"summary":"confirm me"}`), ContentText: "confirm me", Provenance: json.RawMessage(`{"evidence_event_ids":[]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	consolePost(t, handler, "/api/v1/candidates/"+confirmID+"/confirm", token, consoleEnvelope(tenant.ID, userID, "confirm-candidate", map[string]any{}))
+	if node, err := memories.Get(ctx, tenant.ID, confirmID); err != nil || node.Status != "active" || !node.DefaultRetrieval {
+		t.Fatalf("confirm status=%s retrieval=%v err=%v", node.Status, node.DefaultRetrieval, err)
+	}
+	var confirmAudits int
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT count(*) FROM audit_events WHERE resource_id = $1 AND action = 'activate' AND actor_type = 'user'`, confirmID).Scan(&confirmAudits)
+	}); err != nil || confirmAudits != 1 {
+		t.Fatalf("confirm audit count=%d err=%v", confirmAudits, err)
+	}
+
 	// correct creates a replacement memory and supersedes relation.
 	candidate2 := "00000000-0000-4000-8000-0000000c0a03"
 	if _, err := memories.Create(ctx, tenant.ID, ports.MemoryNodeRecord{

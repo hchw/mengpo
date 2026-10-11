@@ -501,3 +501,46 @@
 .auth-card__lang {
   @apply mb-4 flex justify-end;
 }
+
+/* ------------------------------------------------------- run detail dialog */
+@layer components {
+  .modal {
+    @apply fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-canvas/70 p-4 backdrop-blur-sm sm:p-8;
+  }
+  .modal__panel {
+    @apply mt-4 w-full max-w-3xl rounded-2xl border border-line bg-surface shadow-2xl;
+  }
+  .modal__header {
+    @apply flex items-center justify-between gap-4 border-b border-line px-5 py-4;
+  }
+  .modal__title {
+    @apply text-sm font-semibold tracking-tight text-ink;
+  }
+  .modal__close {
+    @apply inline-flex h-8 w-8 items-center justify-center rounded-lg border border-line text-lg leading-none text-muted transition hover:bg-surface-2 hover:text-ink;
+  }
+  .modal__body {
+    @apply flex flex-col gap-5 px-5 py-4;
+  }
+  .modal__body h3 {
+    @apply m-0 text-[11px] font-bold uppercase tracking-widest text-muted;
+  }
+  .modal__note {
+    @apply m-0 text-xs text-faint;
+  }
+  .preview {
+    @apply rounded-xl border border-line bg-surface-2/40 p-3;
+  }
+  .preview header {
+    @apply mb-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-faint;
+  }
+  .preview pre {
+    @apply m-0 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-canvas/60 p-3 font-mono text-[12px] leading-relaxed text-ink-soft;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full border border-line bg-surface px-2 py-0.5 text-[11px] font-medium text-muted;
+  }
+  .run-link {
+    @apply text-left font-medium text-ink underline decoration-dotted decoration-line underline-offset-4 transition hover:text-brand-300;
+  }
+}

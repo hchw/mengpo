@@ -166,6 +166,7 @@ const (
 	TaskFailureAnalysis = "analyze_failure"
 	TaskConsolidation   = "consolidate_memory"
 	TaskConflictScan    = "analyze_conflict"
+	TaskProposeTransfer = "propose_transfer"
 )
 
 var memoryIntentMarkers = []string{"remember", "forget", "correct", "preference", "conflict", "memory_intent"}

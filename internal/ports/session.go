@@ -36,6 +36,11 @@ type SessionListRequest struct {
 	Statuses []string
 	Page     int
 	PageSize int
+	// WithMemoriesOnly restricts the listing to sessions that own at least one
+	// live session-scoped memory. A session row is created eagerly at bind time
+	// (it owns events and authorization), so without this filter the console
+	// explorer would be flooded with sessions that never produced a memory.
+	WithMemoriesOnly bool
 }
 
 // SessionSummaryRecord is one session row for the console session explorer.
@@ -60,4 +65,13 @@ type SessionListPage struct {
 // POST /api/v1/sessions.
 type SessionListRepository interface {
 	ListSessions(ctx context.Context, tenantID string, request SessionListRequest) (SessionListPage, error)
+}
+
+// IdleSessionStore enumerates and conditionally removes bound sessions that
+// never produced any activity. DeleteIdleSession must re-check emptiness inside
+// the same transaction so a session that just received an event is never
+// removed by a stale list.
+type IdleSessionStore interface {
+	ListIdleSessions(ctx context.Context, tenantID string, olderThan time.Time, limit int) ([]SessionSummaryRecord, error)
+	DeleteIdleSession(ctx context.Context, tenantID, sessionID string, olderThan time.Time) (bool, error)
 }

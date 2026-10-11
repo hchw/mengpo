@@ -10,7 +10,7 @@ import type {
   ProjectionDebug,
   SessionSummary,
 } from './types';
-import type { AnalysisRun, ProviderTestResult, ProviderUpdate, ProviderView, ScheduleStatus, ScheduleUpdate } from './types';
+import type { AnalysisRun, AnalysisRunDetail, ProviderTestResult, ProviderUpdate, ProviderView, ScheduleStatus, ScheduleUpdate } from './types';
 
 export const ConsolePaths = {
   sessions: '/api/v1/sessions/list',
@@ -20,7 +20,7 @@ export const ConsolePaths = {
   failures: '/api/v1/failures',
   evaluation: '/api/v1/evaluation',
   members: '/api/v1/members',
-  agents: '/api/v1/agents', providers: '/api/v1/providers', providerTest: '/api/v1/providers/test', schedules: '/api/v1/schedules', analysisRuns: '/api/v1/analysis-runs',
+  agents: '/api/v1/agents', providers: '/api/v1/providers', providerTest: '/api/v1/providers/test', schedules: '/api/v1/schedules', analysisRuns: '/api/v1/analysis-runs', analysisRunDetail: '/api/v1/analysis-runs/detail',
 } as const;
 
 // ConsoleApi is the tenant-scoped read/write surface the console pages use. It
@@ -102,5 +102,9 @@ export class ConsoleApi {
   }
   listAnalysisRuns(page = 1, pageSize = 20): Promise<{ items: AnalysisRun[] }> {
     return this.client.request<{ items: AnalysisRun[] }>(ConsolePaths.analysisRuns, { principal: this.principal, scope: this.scope() }, { page, page_size: pageSize });
+  }
+
+  getAnalysisRunDetail(id: string): Promise<AnalysisRunDetail> {
+    return this.client.request<AnalysisRunDetail>(ConsolePaths.analysisRunDetail, { principal: this.principal, scope: this.scope() }, { id });
   }
 }
