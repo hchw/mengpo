@@ -1,8 +1,8 @@
-import { useEffect, useMemo } from 'react';
+import { useMemo } from 'react';
 import { BrowserRouter } from 'react-router-dom';
 import { ApiClient } from './api/client';
 import { ConsoleApi } from './api/console';
-import { AuthProvider, useAuth, type AuthApi } from './auth/AuthProvider';
+import { AuthProvider, useAuth, type AuthApi, type AuthSessionResult, type RegisterInput } from './auth/AuthProvider';
 import { ConsoleProvider } from './app/ConsoleContext';
 import { AppRoutes } from './app/AppRoutes';
 import { LanguageProvider } from './i18n';
@@ -16,17 +16,6 @@ export interface AppProps {
 
 function ConsoleShell({ client, principalId = 'current-user' }: { client: ApiClient; principalId?: string }) {
   const auth = useAuth();
-
-  // Complete an SSO redirect when the console is opened with ?code=…&state=…
-  useEffect(() => {
-    if (auth.status !== 'anonymous') {
-      return;
-    }
-    const params = new URLSearchParams(window.location.search);
-    if (params.has('code') && params.has('state')) {
-      void auth.handleSsoCallback(window.location.href);
-    }
-  }, [auth]);
 
   // Bind the tenant before children render: page effects run before a parent
   // effect, so syncing here avoids one tenant-scoped request under the
@@ -74,8 +63,8 @@ function toTenant(raw: { id: string; name: string; roles?: string[] }): Tenant {
 }
 
 // createDefaultAuthApi talks to the /api/v1/auth/* endpoints. Responses are v1
-// envelopes, so it unwraps `data`; after exchange it binds the session to a
-// tenant so the console can issue tenant-scoped commands.
+// envelopes, so it unwraps `data`; after register/login it binds the session to
+// a tenant so the console can issue tenant-scoped commands.
 function createDefaultAuthApi(): AuthApi {
   const request = async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(path, {
@@ -83,28 +72,34 @@ function createDefaultAuthApi(): AuthApi {
       ...init,
       headers: { 'content-type': 'application/json', ...init?.headers },
     });
+    const body = await response.json().catch(() => undefined);
     if (!response.ok) {
-      throw new Error(`auth request failed: ${response.status}`);
+      const message = body?.error?.message ?? `auth request failed: ${response.status}`;
+      throw new Error(message);
     }
-    const body = await response.json();
     return (body?.data ?? body) as T;
   };
+
+  const establish = async (path: string, payload: unknown): Promise<AuthSessionResult> => {
+    const data = await request<{ user: { id: string; email: string }; tenants: { id: string; name: string; roles?: string[] }[] }>(path, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    const tenants = (data.tenants ?? []).map(toTenant);
+    const activeTenantId = tenants[0]?.id ?? '';
+    if (activeTenantId) {
+      await request('/api/v1/auth/tenant-context', {
+        method: 'POST',
+        body: JSON.stringify({ tenant_id: activeTenantId }),
+      });
+    }
+    return { user: data.user, tenants, activeTenantId };
+  };
+
   return {
-    exchangeSso: async (assertion) => {
-      const data = await request<{ user: { id: string; email: string }; tenants: { id: string; name: string; roles?: string[] }[] }>(
-        '/api/v1/auth/sso/exchange',
-        { method: 'POST', body: JSON.stringify({ assertion }) },
-      );
-      const tenants = (data.tenants ?? []).map(toTenant);
-      const activeTenantId = tenants[0]?.id ?? '';
-      if (activeTenantId) {
-        await request('/api/v1/auth/tenant-context', {
-          method: 'POST',
-          body: JSON.stringify({ tenant_id: activeTenantId }),
-        });
-      }
-      return { user: data.user, tenants, activeTenantId };
-    },
+    register: (input: RegisterInput) =>
+      establish('/api/v1/auth/register', { email: input.email, password: input.password, display_name: input.displayName ?? '' }),
+    login: (email: string, password: string) => establish('/api/v1/auth/login', { email, password }),
     listTenants: async () =>
       (await request<{ tenants: { id: string; name: string; roles?: string[] }[] }>('/api/v1/auth/tenants')).tenants.map(toTenant),
   };

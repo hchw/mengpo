@@ -1,6 +1,8 @@
 import type { ApiClient } from './client';
 import type {
   AgentRecord,
+  AgentRegistration,
+  AgentRegistrationInput,
   CandidateRecord,
   EvaluationSnapshot,
   FailureRecord,
@@ -81,6 +83,10 @@ export class ConsoleApi {
     return this.client.list<AgentRecord>(ConsolePaths.agents, { principal: this.principal, scope: this.scope() }, page, pageSize);
   }
 
+  createAgent(input: AgentRegistrationInput): Promise<AgentRegistration> {
+    return this.client.request<AgentRegistration>(`${ConsolePaths.agents}/register`, { principal: this.principal, scope: this.scope() }, input);
+  }
+
   disableAgent(agentId: string): Promise<AgentRecord> {
     return this.client.request<AgentRecord>(`${ConsolePaths.agents}/${agentId}/disable`, { principal: this.principal, scope: this.scope() });
   }
@@ -100,8 +106,8 @@ export class ConsoleApi {
   updateSchedule(input: ScheduleUpdate): Promise<unknown> {
     return this.client.request(ConsolePaths.schedules, { principal: this.principal, scope: this.scope() }, input, 'PUT');
   }
-  listAnalysisRuns(page = 1, pageSize = 20): Promise<{ items: AnalysisRun[] }> {
-    return this.client.request<{ items: AnalysisRun[] }>(ConsolePaths.analysisRuns, { principal: this.principal, scope: this.scope() }, { page, page_size: pageSize });
+  listAnalysisRuns(page = 1, pageSize = 20): Promise<Page<AnalysisRun>> {
+    return this.client.request<Page<AnalysisRun>>(ConsolePaths.analysisRuns, { principal: this.principal, scope: this.scope() }, { page, page_size: pageSize });
   }
 
   getAnalysisRunDetail(id: string): Promise<AnalysisRunDetail> {

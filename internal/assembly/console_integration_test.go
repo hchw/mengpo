@@ -76,6 +76,7 @@ func TestConsoleEndpoints(t *testing.T) {
 	store := registry.NewStore(db)
 	tenant := createMigratedTenant(t, ctx, db, store, "console endpoints")
 	t.Cleanup(func() {
+		dropUserTenants(context.Background(), t, db, "console@example.com")
 		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, tenant.ID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.users WHERE email='console@example.com'`)
@@ -88,23 +89,23 @@ func TestConsoleEndpoints(t *testing.T) {
 	}
 	handler := server.Handler()
 
-	exchange := httptest.NewRecorder()
-	exchangeRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/exchange", bytes.NewBufferString(`{"assertion":"console@example.com"}`))
-	exchangeRequest.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(exchange, exchangeRequest)
-	if exchange.Code != http.StatusOK {
-		t.Fatalf("exchange status=%d", exchange.Code)
+	register := httptest.NewRecorder()
+	registerRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBufferString(`{"email":"console@example.com","password":"supersecret"}`))
+	registerRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(register, registerRequest)
+	if register.Code != http.StatusOK {
+		t.Fatalf("register status=%d", register.Code)
 	}
-	token := exchange.Result().Cookies()[0].Value
-	var exchangeBody struct {
+	token := register.Result().Cookies()[0].Value
+	var registerBody struct {
 		Data struct {
 			User struct {
 				ID string `json:"id"`
 			} `json:"user"`
 		} `json:"data"`
 	}
-	_ = json.Unmarshal(exchange.Body.Bytes(), &exchangeBody)
-	userID := exchangeBody.Data.User.ID
+	_ = json.Unmarshal(register.Body.Bytes(), &registerBody)
+	userID := registerBody.Data.User.ID
 	if _, err := db.ExecContext(ctx, `INSERT INTO public.tenant_memberships (id, user_id, tenant_id, status) VALUES ($1::uuid,$2::uuid,$3::uuid,'active')`, randomMemberID(t), userID, tenant.ID); err != nil {
 		t.Fatal(err)
 	}

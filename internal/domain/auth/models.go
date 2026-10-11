@@ -1,6 +1,15 @@
 package auth
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrUserNotFound is returned when no user matches the lookup.
+var ErrUserNotFound = errors.New("user not found")
+
+// ErrEmailExists is returned when creating a user whose email is already taken.
+var ErrEmailExists = errors.New("email already exists")
 
 // User is a local account authenticated by the Memory Service.
 type User struct {

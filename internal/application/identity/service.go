@@ -15,11 +15,16 @@ import (
 
 	"github.com/hchw/mengpo/internal/application/tenants"
 	"github.com/hchw/mengpo/internal/domain/auth"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var (
-	ErrInvalidAssertion = errors.New("sso assertion is invalid")
-	ErrSessionRequired  = errors.New("a verified session is required")
+	ErrInvalidAssertion   = errors.New("sso assertion is invalid")
+	ErrSessionRequired    = errors.New("a verified session is required")
+	ErrInvalidCredentials = errors.New("email or password is incorrect")
+	ErrInvalidEmail       = errors.New("a valid email address is required")
+	ErrWeakPassword       = errors.New("password must be at least 8 characters")
+	ErrAccountDisabled    = errors.New("account is disabled")
 )
 
 // SSOSubject is the verified identity a provider asserts.
@@ -29,15 +34,21 @@ type SSOSubject struct {
 }
 
 // SSOVerifier validates an SSO assertion and returns a verified subject. It must
-// never return identity fields that were not cryptographically verified.
+// never return identity fields that were not cryptographically verified. It
+// remains for programmatic clients (e.g. the pi adapter) and dev/test flows;
+// the console now authenticates with email and password.
 type SSOVerifier interface {
 	Verify(ctx context.Context, assertion string) (SSOSubject, error)
 }
 
+// minPasswordLength is the shortest password accepted at registration.
+const minPasswordLength = 8
+
 // UserStore persists users.
 type UserStore interface {
-	UpsertUserByEmail(ctx context.Context, user auth.User) (auth.User, error)
+	CreateUser(ctx context.Context, user auth.User) (auth.User, error)
 	GetUser(ctx context.Context, userID string) (auth.User, error)
+	GetUserByEmail(ctx context.Context, email string) (auth.User, error)
 }
 
 // MembershipStore resolves memberships (satisfied by tenants.MembershipRepository).
@@ -54,11 +65,18 @@ type SessionStore interface {
 	RevokeSession(ctx context.Context, sessionID string) error
 }
 
+// TenantProvisioner gives a freshly registered user a working tenant context so
+// the console is usable immediately after sign-up.
+type TenantProvisioner interface {
+	ProvisionPersonalTenant(ctx context.Context, user auth.User) error
+}
+
 // Options configures the identity service.
 type Options struct {
 	Users       UserStore
 	Memberships MembershipStore
 	Sessions    SessionStore
+	Provisioner TenantProvisioner
 	Verifier    SSOVerifier
 	SessionTTL  time.Duration
 	Now         func() time.Time
@@ -70,6 +88,7 @@ type Service struct {
 	users       UserStore
 	memberships MembershipStore
 	sessions    SessionStore
+	provisioner TenantProvisioner
 	verifier    SSOVerifier
 	tenants     *tenants.Service
 	sessionTTL  time.Duration
@@ -102,6 +121,7 @@ func NewService(options Options) (*Service, error) {
 		users:       options.Users,
 		memberships: options.Memberships,
 		sessions:    options.Sessions,
+		provisioner: options.Provisioner,
 		verifier:    options.Verifier,
 		tenants:     tenants.NewService(options.Memberships),
 		sessionTTL:  ttl,
@@ -111,15 +131,80 @@ func NewService(options Options) (*Service, error) {
 	}, nil
 }
 
-// AuthResult is returned by an SSO exchange.
+// AuthResult is returned by a successful register or login.
 type AuthResult struct {
 	Token   string
 	User    auth.User
 	Tenants []tenants.TenantOption
 }
 
+// RegisterInput is a self-service sign-up request.
+type RegisterInput struct {
+	Email       string
+	Password    string
+	DisplayName string
+}
+
+// Register creates a password account, provisions a personal tenant and issues
+// a session. The raw token is returned once; only its SHA-256 hash is stored.
+func (s *Service) Register(ctx context.Context, input RegisterInput) (AuthResult, error) {
+	email := normalizeEmail(input.Email)
+	if !validEmail(email) {
+		return AuthResult{}, ErrInvalidEmail
+	}
+	if len(input.Password) < minPasswordLength {
+		return AuthResult{}, ErrWeakPassword
+	}
+	displayName := strings.TrimSpace(input.DisplayName)
+	if displayName == "" {
+		displayName = email
+	}
+	hash, err := HashPassword(input.Password)
+	if err != nil {
+		return AuthResult{}, err
+	}
+	userID, err := s.newID()
+	if err != nil {
+		return AuthResult{}, err
+	}
+	user, err := s.users.CreateUser(ctx, auth.User{
+		ID:           userID,
+		Email:        email,
+		DisplayName:  displayName,
+		PasswordHash: hash,
+		Status:       auth.UserActive,
+	})
+	if err != nil {
+		return AuthResult{}, err
+	}
+	if s.provisioner != nil {
+		if err := s.provisioner.ProvisionPersonalTenant(ctx, user); err != nil {
+			return AuthResult{}, err
+		}
+	}
+	return s.issueSession(ctx, user)
+}
+
+// Login verifies a password and issues a session.
+func (s *Service) Login(ctx context.Context, email, password string) (AuthResult, error) {
+	user, err := s.users.GetUserByEmail(ctx, normalizeEmail(email))
+	if err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			return AuthResult{}, ErrInvalidCredentials
+		}
+		return AuthResult{}, err
+	}
+	if user.Status != auth.UserActive {
+		return AuthResult{}, ErrAccountDisabled
+	}
+	if user.PasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return AuthResult{}, ErrInvalidCredentials
+	}
+	return s.issueSession(ctx, user)
+}
+
 // Exchange verifies an SSO assertion, upserts the user, and issues a session
-// token. The raw token is returned once; only its SHA-256 hash is stored.
+// token. It stays for programmatic clients that cannot present a password.
 func (s *Service) Exchange(ctx context.Context, assertion string) (AuthResult, error) {
 	if s.verifier == nil {
 		return AuthResult{}, errors.New("no SSO verifier is configured")
@@ -135,15 +220,23 @@ func (s *Service) Exchange(ctx context.Context, assertion string) (AuthResult, e
 	if err != nil {
 		return AuthResult{}, err
 	}
-	user, err := s.users.UpsertUserByEmail(ctx, auth.User{
+	user, err := s.users.CreateUser(ctx, auth.User{
 		ID:          userID,
-		Email:       strings.ToLower(strings.TrimSpace(subject.Email)),
+		Email:       normalizeEmail(subject.Email),
 		DisplayName: subject.DisplayName,
 		Status:      auth.UserActive,
 	})
+	if errors.Is(err, auth.ErrEmailExists) {
+		user, err = s.users.GetUserByEmail(ctx, normalizeEmail(subject.Email))
+	}
 	if err != nil {
 		return AuthResult{}, err
 	}
+	return s.issueSession(ctx, user)
+}
+
+// issueSession mints a token, stores its hash and lists the user's tenants.
+func (s *Service) issueSession(ctx context.Context, user auth.User) (AuthResult, error) {
 	token, err := s.newToken()
 	if err != nil {
 		return AuthResult{}, err
@@ -221,17 +314,45 @@ func (s *Service) Revoke(ctx context.Context, token string) error {
 	return s.sessions.RevokeSession(ctx, session.ID)
 }
 
+// HashPassword hashes a plaintext password with bcrypt.
+func HashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 // InternalVerifier trusts the assertion as a verified email subject. It exists
 // for development and tests only; production deployments must inject an OIDC or
 // JWT verifier.
 type InternalVerifier struct{}
 
 func (InternalVerifier) Verify(_ context.Context, assertion string) (SSOSubject, error) {
-	email := strings.ToLower(strings.TrimSpace(assertion))
-	if !strings.Contains(email, "@") || strings.ContainsAny(email, " \t\n") {
+	email := normalizeEmail(assertion)
+	if !validEmail(email) {
 		return SSOSubject{}, fmt.Errorf("%w: not an email subject", ErrInvalidAssertion)
 	}
 	return SSOSubject{Email: email, DisplayName: email}, nil
+}
+
+// validEmail performs a minimal shape check: a local part, an @ and a dotted
+// domain with no whitespace.
+func validEmail(email string) bool {
+	if email == "" || strings.ContainsAny(email, " \t\n") {
+		return false
+	}
+	at := strings.LastIndex(email, "@")
+	if at <= 0 || at == len(email)-1 {
+		return false
+	}
+	domain := email[at+1:]
+	dot := strings.Index(domain, ".")
+	return dot > 0 && dot < len(domain)-1
 }
 
 func randomID() (string, error) {

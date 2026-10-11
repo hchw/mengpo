@@ -29,6 +29,13 @@ describe('DashboardPage', () => {
     render(<DashboardPage api={fakeConsoleApi({ listSessions: async () => page([]), listMemories: async () => page([]) })} />);
     await waitFor(() => expect(screen.getByRole('status').textContent).toContain('No sessions or memories'));
   });
+
+  it('reports unmeasured evaluation metrics as no data, not 0%', async () => {
+    render(<DashboardPage api={fakeConsoleApi({ getEvaluation: async () => evaluation({ has_data: false }) })} />);
+    await waitFor(() => expect(screen.getByTestId('retrieval-precision')).toBeTruthy());
+    expect(screen.getByTestId('retrieval-precision').textContent).toContain('no data yet');
+    expect(screen.getByTestId('cache-hit-rate').textContent).toContain('no data yet');
+  });
 });
 
 describe('SessionExplorerPage', () => {
@@ -135,6 +142,23 @@ describe('MemoryEvaluationPage', () => {
     expect(screen.getByTestId('metric-latency_ms_p95').textContent).toBe('120 ms');
     expect(screen.getByTestId('metric-cost_usd').textContent).toBe('$0.12');
   });
+
+  it('shows a no-data notice when nothing has been evaluated', async () => {
+    render(<MemoryEvaluationPage api={fakeConsoleApi({ getEvaluation: async () => evaluation({ has_data: false }) })} />);
+    await waitFor(() => expect(screen.getByTestId('evaluation-no-data')).toBeTruthy());
+    expect(screen.getByTestId('metric-retrieval_precision').textContent).toBe('—');
+  });
+
+  it('renders metrics outside measured_metrics as unmeasured', async () => {
+    render(
+      <MemoryEvaluationPage
+        api={fakeConsoleApi({ getEvaluation: async () => evaluation({ measured_metrics: ['retrieval_precision', 'cache_hit_rate'] }) })}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId('metric-retrieval_precision').textContent).toBe('90.0%'));
+    expect(screen.getByTestId('metric-promotion_precision').textContent).toBe('—');
+    expect(screen.getByTestId('metric-cost_usd').textContent).toBe('—');
+  });
 });
 
 describe('MembersPage', () => {
@@ -148,6 +172,24 @@ describe('MembersPage', () => {
     await waitFor(() => expect(updateMemberRole).toHaveBeenCalledWith('u1', 'owner'));
     await user.click(screen.getByRole('button', { name: 'disable' }));
     await waitFor(() => expect(disableAgent).toHaveBeenCalledWith('a1'));
+  });
+
+  it('creates an agent and reveals the one-time secret', async () => {
+    const createAgent = vi.fn(async (input: { name: string; allowed_scopes: string[]; capabilities: string[]; allowed_user_ids?: string[] }) => ({
+      id: 'a2',
+      name: input.name,
+      status: 'active' as const,
+      capabilities: input.capabilities,
+      allowed_scopes: input.allowed_scopes as ('user-global' | 'session')[],
+      secret: 'once-secret',
+    }));
+    const api = fakeConsoleApi({ listMembers: async () => page([member('u1')]), listAgents: async () => page([]), createAgent });
+    render(<MembersPage api={api} role="tenant-admin" currentUserId="u1" />);
+    await waitFor(() => expect(screen.getByTestId('agent-list')).toBeInTheDocument());
+    await user.type(screen.getByLabelText('Name'), 'Pi Agent');
+    await user.click(screen.getByRole('button', { name: 'Create agent' }));
+    await waitFor(() => expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({ name: 'Pi Agent', allowed_user_ids: ['u1'] })));
+    expect(screen.getByTestId('agent-secret').textContent).toContain('once-secret');
   });
 
   it('shows a permission state for a plain member', async () => {
@@ -185,7 +227,7 @@ describe('AnalysisRunsPage', () => {
   it('shows the tenant curation schedule and run records', async () => {
     const api = fakeConsoleApi({
       listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
-      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1'), analysisRun('run-2', { status: 'dead_letter', degraded_reason: 'rules_only' })] })),
+      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1'), analysisRun('run-2', { status: 'dead_letter', degraded_reason: 'rules_only' })], total: 2, page: 1, page_size: 20 })),
     });
     render(<AnalysisRunsPage api={api} />);
     await waitFor(() => expect(screen.getByTestId('analysis-runs').children.length).toBeGreaterThan(0));
@@ -196,10 +238,21 @@ describe('AnalysisRunsPage', () => {
     expect(screen.getByTestId('curation-schedule').dataset.failing).toBe('false');
   });
 
+  it('pages the curation record and requests the next page', async () => {
+    const listAnalysisRuns = vi.fn(async (page = 1) => ({ items: [analysisRun(`run-${page}`)], total: 25, page, page_size: 20 }));
+    const api = fakeConsoleApi({ listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })), listAnalysisRuns });
+    render(<AnalysisRunsPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('analysis-run-run-1')).toBeInTheDocument());
+    expect(screen.getByTestId('pagination-status').textContent).toBe('Page 1 of 2 · 25 total');
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(listAnalysisRuns).toHaveBeenLastCalledWith(2, 20));
+    await waitFor(() => expect(screen.getByTestId('analysis-run-run-2')).toBeInTheDocument());
+  });
+
   it('renders curation enums in Chinese when the language is zh', async () => {
     const api = fakeConsoleApi({
       listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
-      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1'), analysisRun('run-2', { status: 'dead_letter', degraded_reason: 'rules_only' })] })),
+      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1'), analysisRun('run-2', { status: 'dead_letter', degraded_reason: 'rules_only' })], total: 2, page: 1, page_size: 20 })),
     });
     render(
       <LanguageProvider initialLanguage="zh">
@@ -231,7 +284,7 @@ describe('AnalysisRunsPage', () => {
   it('opens a task detail dialog with its source events and produced memories', async () => {
     const api = fakeConsoleApi({
       listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
-      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1')] })),
+      listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1')], total: 1, page: 1, page_size: 20 })),
       getAnalysisRunDetail: vi.fn(async (id: string) => analysisRunDetail(id)),
     });
     render(<AnalysisRunsPage api={api} />);

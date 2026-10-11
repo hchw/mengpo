@@ -135,6 +135,14 @@ export interface EvaluationSnapshot {
   tokens_per_projection: number;
   cost_usd: number;
   cache_hit_rate: number;
+  // has_data distinguishes "measured 0%" from "nothing recorded yet";
+  // projections/feedback_samples state the sample size behind each rate.
+  has_data?: boolean;
+  projections?: number;
+  feedback_samples?: number;
+  // measured_metrics lists the metrics actually derived from telemetry. Keys
+  // absent from it must render as unmeasured, never as 0%.
+  measured_metrics?: string[];
 }
 
 export interface Member {
@@ -150,6 +158,25 @@ export interface AgentRecord {
   status: 'active' | 'disabled';
   capabilities: string[];
   allowed_scopes: ScopeType[];
+}
+
+export interface AgentRegistrationInput {
+  name: string;
+  allowed_user_ids?: string[];
+  allowed_session_ids?: string[];
+  allowed_scopes: ScopeType[];
+  capabilities: string[];
+}
+
+// AgentRegistration is the one-time response of agent creation; secret is shown
+// exactly once and never retrievable again.
+export interface AgentRegistration {
+  id: string;
+  name: string;
+  status: 'active' | 'disabled';
+  capabilities: string[];
+  allowed_scopes: ScopeType[];
+  secret: string;
 }
 
 export interface ProviderView { provider: string; enabled: boolean; base_url: string; model: string; has_secret: boolean; secret_hint: string; source: 'tenant' | 'env' | 'disabled'; updated_by?: string; updated_at?: string;

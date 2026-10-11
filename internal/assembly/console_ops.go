@@ -23,7 +23,7 @@ type ConsoleOps struct {
 	Providers      *providerconfig.Service
 	Schedules      ScheduleAdmin
 	ScheduleStatus func(ctx context.Context, tenantID string) ([]ports.ScheduleStatus, error)
-	Runs           ports.AnalysisRunStore
+	Runs           AnalysisRunLister
 	RunDetails     ports.AnalysisRunDetailReader
 	Audit          ports.AuditWriter
 	Logger         *slog.Logger
@@ -215,6 +215,13 @@ func (c *ConsoleOps) handleScheduleUpdate(w http.ResponseWriter, r *http.Request
 	writeAPIData(w, http.StatusOK, map[string]any{"name": payload.Name, "cadence_seconds": payload.CadenceSeconds, "enabled": payload.Enabled})
 }
 
+// AnalysisRunLister pages the curation record for the console. It needs both a
+// page of rows and the total behind the same filter so the pager can be exact.
+type AnalysisRunLister interface {
+	ListAnalysisRuns(ctx context.Context, tenantID string, filter ports.AnalysisRunFilter) ([]ports.AnalysisRunView, error)
+	CountAnalysisRuns(ctx context.Context, tenantID string, filter ports.AnalysisRunFilter) (int, error)
+}
+
 type analysisRunPayload struct {
 	SessionID string `json:"session_id"`
 	TaskType  string `json:"task_type"`
@@ -233,13 +240,22 @@ func (c *ConsoleOps) handleAnalysisRuns(w http.ResponseWriter, r *http.Request) 
 	if len(envelope.Payload) > 0 {
 		_ = json.Unmarshal(envelope.Payload, &payload)
 	}
-	runs, err := c.Runs.ListAnalysisRuns(r.Context(), scoped.TenantID, ports.AnalysisRunFilter{
+	filter := ports.AnalysisRunFilter{
 		SessionID: payload.SessionID, TaskType: payload.TaskType, Status: payload.Status,
 		Page: payload.Page, PageSize: payload.PageSize,
-	})
+	}
+	runs, err := c.Runs.ListAnalysisRuns(r.Context(), scoped.TenantID, filter)
 	if err != nil {
 		if c.Logger != nil {
 			c.Logger.Error("list analysis runs failed", slog.String("tenant_id", scoped.TenantID), slog.String("error", err.Error()))
+		}
+		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to list analysis runs")
+		return
+	}
+	total, err := c.Runs.CountAnalysisRuns(r.Context(), scoped.TenantID, filter)
+	if err != nil {
+		if c.Logger != nil {
+			c.Logger.Error("count analysis runs failed", slog.String("tenant_id", scoped.TenantID), slog.String("error", err.Error()))
 		}
 		writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to list analysis runs")
 		return
@@ -248,7 +264,8 @@ func (c *ConsoleOps) handleAnalysisRuns(w http.ResponseWriter, r *http.Request) 
 	for _, run := range runs {
 		items = append(items, analysisRunItem(run))
 	}
-	writeAPIData(w, http.StatusOK, map[string]any{"items": items})
+	page, pageSize := normalizeRunPage(filter.Page, filter.PageSize)
+	writeAPIData(w, http.StatusOK, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
 }
 
 // analysisRunItem renders one run for the console. input_count/output_count let
@@ -405,4 +422,16 @@ func formatTime(value time.Time) string {
 		return ""
 	}
 	return value.UTC().Format(time.RFC3339)
+}
+
+// normalizeRunPage mirrors the repository defaults so the response reports the
+// page that was actually read.
+func normalizeRunPage(page, pageSize int) (int, int) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 200 {
+		pageSize = 50
+	}
+	return page, pageSize
 }

@@ -20,13 +20,16 @@ describe('App sign-in', () => {
 
     const tenants = [{ id: 'tenant-a', name: 'Demo', status: 'active' as const, role: 'member' as const }];
     const authApi: AuthApi = {
-      exchangeSso: vi.fn(async () => ({ user: { id: 'user-42', email: 'dev@mengpo.local' }, tenants, activeTenantId: 'tenant-a' })),
+      register: vi.fn(async () => ({ user: { id: 'user-42', email: 'dev@mengpo.local' }, tenants, activeTenantId: 'tenant-a' })),
+      login: vi.fn(async () => ({ user: { id: 'user-42', email: 'dev@mengpo.local' }, tenants, activeTenantId: 'tenant-a' })),
       listTenants: vi.fn(async () => tenants),
     };
 
     render(<App authApi={authApi} client={new ApiClient({ tenantId: 'unselected', fetchImpl })} />);
 
     const form = await screen.findByRole('form', { name: 'sign in' });
+    await userEvent.type(form.querySelector('#signin-email') as HTMLInputElement, 'dev@mengpo.local');
+    await userEvent.type(form.querySelector('#signin-password') as HTMLInputElement, 'dev-password');
     await userEvent.click(form.querySelector('button[type="submit"]') as HTMLButtonElement);
 
     await waitFor(() => expect(calls.length).toBeGreaterThan(0));

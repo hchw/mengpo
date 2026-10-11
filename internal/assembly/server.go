@@ -14,6 +14,7 @@ import (
 	"github.com/hchw/mengpo/internal/adapters/postgres"
 	"github.com/hchw/mengpo/internal/api/httpapi"
 	"github.com/hchw/mengpo/internal/application/agentaccess"
+	"github.com/hchw/mengpo/internal/application/agents"
 	"github.com/hchw/mengpo/internal/application/governance"
 	"github.com/hchw/mengpo/internal/application/identity"
 	"github.com/hchw/mengpo/internal/application/observation"
@@ -71,6 +72,7 @@ func BuildUseCases(cfg config.Config, db *sql.DB) (httpapi.UseCases, error) {
 		DegradeOnDatabaseError: true,
 		RankingContext:         recall.RankingContext{IncludeCandidates: true, MaxCandidates: defaultRankingBudget},
 	}, recallService, nil, projection.NewPersistence(projections))
+	pipeline = pipeline.WithTelemetry(projections, newUUID)
 	orchestrator := projection.NewOrchestrator(projection.Policy{
 		AllowDivergenceHint:      true,
 		AllowWeakCandidateRecall: true,
@@ -159,6 +161,7 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 		Users:       identityRepo,
 		Memberships: identityRepo,
 		Sessions:    identityRepo,
+		Provisioner: NewRegistrationProvisioner(registry.NewStore(db), identityRepo),
 		Verifier:    verifier,
 		SessionTTL:  cfg.Auth.SessionTTL,
 	})
@@ -169,18 +172,24 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 	metrics := &observability.Metrics{}
 	readiness := func(ctx context.Context) error { return pingDB(ctx, db) }
 	authAPI := &AuthAPI{Service: identityService, CookieName: cfg.Auth.SessionCookieName, CookieSecure: cfg.Auth.SessionCookieSecure}
-	authenticator := SessionAuthenticator{Service: identityService, CookieName: cfg.Auth.SessionCookieName, Memberships: identityRepo}
+	agentRepo := postgres.NewAgentRepository(db)
+	authenticator := CompositeAuthenticator{
+		Session: SessionAuthenticator{Service: identityService, CookieName: cfg.Auth.SessionCookieName, Memberships: identityRepo},
+		Agent:   AgentAuthenticator{Agents: agentRepo},
+	}
 	router := tenantdb.NewRouter(db, registry.NewStore(db))
 	memoryRepository := postgres.NewMemoryRepository(router)
 	consoleAPI := &ConsoleAPI{
-		Memories:   memoryRepository,
-		List:       memoryRepository,
-		Merge:      memoryRepository,
-		Sessions:   postgres.NewSessionRepository(router),
-		Governance: governance.NewService(memoryRepository),
-		Members:    identityRepo,
-		Agents:     postgres.NewAgentRepository(db),
-		Triage:     postgres.NewTriageRepository(router),
+		Memories:       memoryRepository,
+		List:           memoryRepository,
+		Merge:          memoryRepository,
+		Sessions:       postgres.NewSessionRepository(router),
+		Governance:     governance.NewService(memoryRepository),
+		Members:        identityRepo,
+		Agents:         agentRepo,
+		AgentRegistrar: agents.NewService(agentRepo),
+		Triage:         postgres.NewTriageRepository(router),
+		Metrics:        postgres.NewProjectionRepository(router),
 	}
 	providerService, err := NewProviderService(cfg, router, newProviderAnalystBuilder(cfg))
 	if err != nil {

@@ -79,6 +79,10 @@ func (opsRuns) FinishAnalysisRun(context.Context, string, string, ports.Analysis
 func (opsRuns) LinkRunOutputs(context.Context, string, string, []string) (bool, error) {
 	return true, nil
 }
+func (opsRuns) CountAnalysisRuns(context.Context, string, ports.AnalysisRunFilter) (int, error) {
+	return 1, nil
+}
+
 func (opsRuns) ListAnalysisRuns(context.Context, string, ports.AnalysisRunFilter) ([]ports.AnalysisRunView, error) {
 	return []ports.AnalysisRunView{{AnalysisRunRecord: ports.AnalysisRunRecord{
 		ID: "run-1", TaskType: "consolidate_memory", Trigger: ports.TriggerSchedule, Provider: "memory-llm",

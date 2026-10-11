@@ -98,7 +98,10 @@ func (e Envelope) Validate() error {
 	if (e.Principal.Type != "user" && e.Principal.Type != "agent") || !validToken(e.Principal.ID, MaxRequestIDLength) {
 		return fmt.Errorf("%w: principal type/id is invalid", ErrInvalidEnvelope)
 	}
-	if !validToken(e.Scope.TenantID, MaxRequestIDLength) || !validToken(e.Scope.UserID, MaxRequestIDLength) {
+	// An agent credential resolves its tenant and bound user server-side, so an
+	// agent envelope may leave them empty; the principal id is a client label.
+	// Every other principal must declare the full scope.
+	if e.Principal.Type != "agent" && (!validToken(e.Scope.TenantID, MaxRequestIDLength) || !validToken(e.Scope.UserID, MaxRequestIDLength)) {
 		return fmt.Errorf("%w: tenant and user scope are required", ErrInvalidEnvelope)
 	}
 	switch e.Scope.Type {

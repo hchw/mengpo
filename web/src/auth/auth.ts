@@ -58,15 +58,3 @@ export function authReducer(state: AuthState, action: AuthAction): AuthState {
 export function activeTenant(state: AuthState): Tenant | undefined {
   return state.tenants.find((tenant) => tenant.id === state.activeTenantId);
 }
-
-// parseSsoCallback extracts the authorization code and state from the SSO
-// redirect. Missing state is rejected to prevent CSRF-style login injection.
-export function parseSsoCallback(url: string): { code: string; state: string } {
-  const parsed = new URL(url, 'https://console.invalid');
-  const code = parsed.searchParams.get('code') ?? '';
-  const state = parsed.searchParams.get('state') ?? '';
-  if (!code || !state) {
-    throw new Error('SSO callback is missing code or state');
-  }
-  return { code, state };
-}

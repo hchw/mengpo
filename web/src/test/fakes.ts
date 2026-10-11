@@ -2,7 +2,7 @@ import { vi } from 'vitest';
 import type { ConsoleApi } from '../api/console';
 import type {
   ProviderUpdate as ProviderUpdateInput,
-  AgentRecord,
+  AgentRecord, AgentRegistrationInput,
   CandidateRecord,
   EvaluationSnapshot,
   FailureRecord,
@@ -85,6 +85,9 @@ export const evaluation = (overrides: Partial<EvaluationSnapshot> = {}): Evaluat
   tokens_per_projection: 500,
   cost_usd: 0.12,
   cache_hit_rate: 0.4,
+  has_data: true,
+  projections: 20,
+  feedback_samples: 10,
   ...overrides,
 });
 
@@ -195,13 +198,21 @@ export function fakeConsoleApi(overrides: Partial<ConsoleApi> = {}): ConsoleApi 
     inviteMember: vi.fn(async (email: string) => member(email)),
     updateMemberRole: vi.fn(async (id: string, role: Member['role']) => member(id, { role })),
     listAgents: vi.fn(async () => page([agent('a1')])),
+    createAgent: vi.fn(async (input: AgentRegistrationInput) => ({
+      id: 'a2',
+      name: input.name,
+      status: 'active' as const,
+      capabilities: input.capabilities,
+      allowed_scopes: input.allowed_scopes,
+      secret: 'once-secret',
+    })),
     disableAgent: vi.fn(async (id: string) => agent(id, { status: 'disabled' })),
     getProvider: vi.fn(async () => provider()),
     updateProvider: vi.fn(async (input: ProviderUpdateInput) => provider(input)),
     testProvider: vi.fn(async () => ({ ok: true, latency_ms: 7, error: '' })),
     listSchedules: vi.fn(async () => ({ items: [scheduleStatus()] })),
     updateSchedule: vi.fn(async () => ({})),
-    listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1')] })),
+    listAnalysisRuns: vi.fn(async () => ({ items: [analysisRun('run-1')], total: 1, page: 1, page_size: 20 })),
     getAnalysisRunDetail: vi.fn(async (id: string) => analysisRunDetail(id)),
     ...overrides,
   } as unknown as ConsoleApi;

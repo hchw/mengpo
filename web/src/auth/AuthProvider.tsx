@@ -1,16 +1,29 @@
 import { createContext, useCallback, useContext, useMemo, useReducer, type ReactNode } from 'react';
 import type { Tenant } from '../api/types';
-import { authReducer, initialAuthState, parseSsoCallback, type AuthState, type AuthUser } from './auth';
+import { authReducer, initialAuthState, type AuthState, type AuthUser } from './auth';
+
+export interface AuthSessionResult {
+  user: AuthUser;
+  tenants: Tenant[];
+  activeTenantId: string;
+}
+
+export interface RegisterInput {
+  email: string;
+  password: string;
+  displayName?: string;
+}
 
 export interface AuthApi {
-  exchangeSso(code: string, state: string): Promise<{ user: AuthUser; tenants: Tenant[]; activeTenantId: string }>;
+  register(input: RegisterInput): Promise<AuthSessionResult>;
+  login(email: string, password: string): Promise<AuthSessionResult>;
   listTenants(): Promise<Tenant[]>;
   onTenantChanged?(tenantId: string): void;
 }
 
 export interface AuthContextValue extends AuthState {
-  loginUrl(returnTo: string): string;
-  handleSsoCallback(url: string): Promise<void>;
+  register(input: RegisterInput): Promise<void>;
+  login(email: string, password: string): Promise<void>;
   selectTenant(tenantId: string): Promise<void>;
   logout(): void;
 }
@@ -20,36 +33,28 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 export interface AuthProviderProps {
   api: AuthApi;
   children: ReactNode;
-  loginBaseUrl?: string;
   initialState?: AuthState;
 }
 
-export function AuthProvider({ api, children, loginBaseUrl = '/api/v1/auth/sso', initialState }: AuthProviderProps) {
+export function AuthProvider({ api, children, initialState }: AuthProviderProps) {
   const [state, dispatch] = useReducer(authReducer, initialState ?? initialAuthState);
 
-  const loginUrl = useCallback(
-    (returnTo: string) => {
-      const url = new URL(loginBaseUrl, 'https://console.invalid');
-      url.searchParams.set('redirect_uri', returnTo);
-      return url.pathname + url.search;
-    },
-    [loginBaseUrl],
-  );
-
-  const handleSsoCallback = useCallback(
-    async (callbackUrl: string) => {
+  const complete = useCallback(
+    async (run: () => Promise<AuthSessionResult>) => {
       dispatch({ type: 'login-started' });
       try {
-        const { code, state: ssoState } = parseSsoCallback(callbackUrl);
-        const result = await api.exchangeSso(code, ssoState);
+        const result = await run();
         dispatch({ type: 'login-succeeded', user: result.user, tenants: result.tenants, activeTenantId: result.activeTenantId });
         api.onTenantChanged?.(result.activeTenantId);
       } catch (error) {
-        dispatch({ type: 'login-failed', error: error instanceof Error ? error.message : 'login failed' });
+        dispatch({ type: 'login-failed', error: error instanceof Error ? error.message : 'authentication failed' });
       }
     },
     [api],
   );
+
+  const register = useCallback((input: RegisterInput) => complete(() => api.register(input)), [api, complete]);
+  const login = useCallback((email: string, password: string) => complete(() => api.login(email, password)), [api, complete]);
 
   const selectTenant = useCallback(
     async (tenantId: string) => {
@@ -64,8 +69,8 @@ export function AuthProvider({ api, children, loginBaseUrl = '/api/v1/auth/sso',
   }, []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ ...state, loginUrl, handleSsoCallback, selectTenant, logout }),
-    [state, loginUrl, handleSsoCallback, selectTenant, logout],
+    () => ({ ...state, register, login, selectTenant, logout }),
+    [state, register, login, selectTenant, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

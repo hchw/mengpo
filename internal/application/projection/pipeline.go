@@ -71,13 +71,26 @@ type Pipeline struct {
 	sessionContext ports.SessionContextProvider
 	persistence    *Persistence
 	budgets        *BudgetManager
+	telemetry      ports.RetrievalTelemetryWriter
+	newID          func() (string, error)
+	now            func() time.Time
 }
 
 func NewPipeline(policy PipelinePolicy, retriever Retriever, sessionContext ports.SessionContextProvider, persistence *Persistence) *Pipeline {
 	if policy.Timeout <= 0 {
 		policy.Timeout = 2 * time.Second
 	}
-	return &Pipeline{policy: policy, retriever: retriever, sessionContext: sessionContext, persistence: persistence, budgets: NewBudgetManager()}
+	return &Pipeline{policy: policy, retriever: retriever, sessionContext: sessionContext, persistence: persistence, budgets: NewBudgetManager(), newID: newUUID, now: time.Now}
+}
+
+// WithTelemetry attaches retrieval telemetry. It is applied after construction
+// so callers that do not need tracing keep the simpler constructor.
+func (p *Pipeline) WithTelemetry(writer ports.RetrievalTelemetryWriter, newID func() (string, error)) *Pipeline {
+	p.telemetry = writer
+	if newID != nil {
+		p.newID = newID
+	}
+	return p
 }
 
 func (p *Pipeline) Run(ctx context.Context, request PipelineRequest) (Projection, error) {
@@ -95,6 +108,28 @@ func (p *Pipeline) Run(ctx context.Context, request PipelineRequest) (Projection
 		return Projection{}, errors.New("projection pipeline requires a retriever")
 	}
 	metadata := ProjectionMetadata{Mode: mode, Reason: request.Decision.Reason, DegradedReasons: []string{}}
+	started := p.now()
+	// record writes one telemetry row per request, hit or miss, best effort.
+	// A trace failure must never fail the projection the caller already got.
+	record := func(selectedIDs []string, candidateCount, tokens int, cacheHit bool, degraded bool) {
+		if p.telemetry == nil {
+			return
+		}
+		id, err := p.newID()
+		if err != nil {
+			return
+		}
+		degradedMode := ""
+		if degraded {
+			degradedMode = "degraded"
+		}
+		_ = p.telemetry.RecordRetrievalEvent(context.WithoutCancel(ctx), request.TenantID, ports.RetrievalEvent{
+			ID: id, RequestID: request.QueryHash, UserID: request.UserID, SessionID: request.SessionID,
+			QueryHash: request.QueryHash, Mode: mode, CandidateCount: candidateCount, SelectedIDs: selectedIDs,
+			LatencyMS: int(p.now().Sub(started).Milliseconds()), TokensInjected: tokens, CacheHit: cacheHit,
+			DegradedMode: degradedMode,
+		})
+	}
 
 	cacheKey := ""
 	if p.persistence != nil && p.policy.CacheTTL > 0 {
@@ -111,6 +146,7 @@ func (p *Pipeline) Run(ctx context.Context, request PipelineRequest) (Projection
 				metadata.CacheHit = true
 				// A cache hit returns the identity of the projection that produced this
 				// result, so the caller can still reference what it actually received.
+				record(selectedIDs(stored.Items), 0, stored.Usage.TokensInjected, true, false)
 				return Projection{Items: stored.Items, Usage: stored.Usage, Metadata: metadata, ProjectionID: stored.ProjectionID}, nil
 			}
 		}
@@ -123,10 +159,14 @@ func (p *Pipeline) Run(ctx context.Context, request PipelineRequest) (Projection
 	if err != nil {
 		timeout := errors.Is(err, context.DeadlineExceeded) || errors.Is(recallCtx.Err(), context.DeadlineExceeded)
 		if timeout {
-			return p.degradeToSessionContext(ctx, request, metadata, "retrieval-timeout")
+			degraded, derr := p.degradeToSessionContext(ctx, request, metadata, "retrieval-timeout")
+			record(selectedIDs(degraded.Items), 0, degraded.Usage.TokensInjected, false, true)
+			return degraded, derr
 		}
 		if p.policy.DegradeOnDatabaseError {
-			return p.degradeToSessionContext(ctx, request, metadata, "retrieval-database-unavailable: "+err.Error())
+			degraded, derr := p.degradeToSessionContext(ctx, request, metadata, "retrieval-database-unavailable: "+err.Error())
+			record(selectedIDs(degraded.Items), 0, degraded.Usage.TokensInjected, false, true)
+			return degraded, derr
 		}
 		return Projection{}, fmt.Errorf("retrieval failed: %w", err)
 	}
@@ -168,7 +208,20 @@ func (p *Pipeline) Run(ctx context.Context, request PipelineRequest) (Projection
 			}
 		}
 	}
+	record(selectedIDs(selected.Selected), len(candidates), selected.Usage.TokensInjected, false, projection.Metadata.Degraded)
 	return projection, nil
+}
+
+// selectedIDs extracts the memory ids from a projection's selected items. Items
+// produced by degradeToSessionContext carry only text, so their ids are absent.
+func selectedIDs(items []Item) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if id := item.Candidate.Node.ID; id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (p *Pipeline) degradeToSessionContext(ctx context.Context, request PipelineRequest, metadata ProjectionMetadata, reason string) (Projection, error) {

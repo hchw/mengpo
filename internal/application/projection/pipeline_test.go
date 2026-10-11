@@ -183,3 +183,37 @@ func TestPipelineValidatesInputs(t *testing.T) {
 	}
 	_ = json.Valid
 }
+
+type fakeTelemetry struct{ events []ports.RetrievalEvent }
+
+func (f *fakeTelemetry) RecordRetrievalEvent(_ context.Context, _ string, event ports.RetrievalEvent) error {
+	f.events = append(f.events, event)
+	return nil
+}
+
+func TestPipelineRecordsRetrievalTelemetryForHitsAndMisses(t *testing.T) {
+	repo := &fakeProjectionRepository{}
+	telemetry := &fakeTelemetry{}
+	pipeline := NewPipeline(PipelinePolicy{CacheTTL: time.Minute, RankingContext: recall.RankingContext{SessionID: "session"}}, &fakeRetriever{candidates: []ports.RecallCandidate{pipelineCandidate("a", "alpha", .9)}}, nil, NewPersistence(repo)).WithTelemetry(telemetry, nil)
+	if _, err := pipeline.Run(context.Background(), pipelineRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pipeline.Run(context.Background(), pipelineRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if len(telemetry.events) != 2 {
+		t.Fatalf("telemetry events = %d, want 2", len(telemetry.events))
+	}
+	if telemetry.events[0].CacheHit || !telemetry.events[1].CacheHit {
+		t.Fatalf("cache hit flags = %v/%v, want false/true", telemetry.events[0].CacheHit, telemetry.events[1].CacheHit)
+	}
+	if len(telemetry.events[0].SelectedIDs) != 1 || telemetry.events[0].SelectedIDs[0] != "a" {
+		t.Fatalf("miss selected ids = %#v", telemetry.events[0].SelectedIDs)
+	}
+	if len(telemetry.events[1].SelectedIDs) != 1 || telemetry.events[1].SelectedIDs[0] != "a" {
+		t.Fatalf("hit selected ids = %#v", telemetry.events[1].SelectedIDs)
+	}
+	if telemetry.events[0].QueryHash != "hash" || telemetry.events[0].Mode != "focus" || telemetry.events[0].TokensInjected == 0 {
+		t.Fatalf("telemetry = %#v", telemetry.events[0])
+	}
+}

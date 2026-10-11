@@ -173,15 +173,9 @@ func scanAnalysisRun(row rowScanner) (ports.AnalysisRunView, error) {
 	return view, nil
 }
 
-func (r *AnalystRunRepository) ListAnalysisRuns(ctx context.Context, tenantID string, filter ports.AnalysisRunFilter) ([]ports.AnalysisRunView, error) {
-	pageSize := filter.PageSize
-	if pageSize <= 0 || pageSize > 200 {
-		pageSize = 50
-	}
-	page := filter.Page
-	if page <= 0 {
-		page = 1
-	}
+// analysisRunWhere builds the shared predicate for list and count so the total
+// the pager shows is computed over exactly the same rows.
+func analysisRunWhere(filter ports.AnalysisRunFilter) (string, []any) {
 	var conditions []string
 	var args []any
 	add := func(condition string, value any) {
@@ -203,10 +197,36 @@ func (r *AnalystRunRepository) ListAnalysisRuns(ctx context.Context, tenantID st
 	if filter.Until != nil {
 		add("created_at < $%d", filter.Until.UTC())
 	}
-	query := `SELECT ` + analysisRunColumns + ` FROM analysis_jobs`
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
+	if len(conditions) == 0 {
+		return "", args
 	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+// CountAnalysisRuns counts the rows matching the same filter, ignoring paging.
+func (r *AnalystRunRepository) CountAnalysisRuns(ctx context.Context, tenantID string, filter ports.AnalysisRunFilter) (int, error) {
+	where, args := analysisRunWhere(filter)
+	total := 0
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT count(*) FROM analysis_jobs`+where, args...).Scan(&total)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (r *AnalystRunRepository) ListAnalysisRuns(ctx context.Context, tenantID string, filter ports.AnalysisRunFilter) ([]ports.AnalysisRunView, error) {
+	pageSize := filter.PageSize
+	if pageSize <= 0 || pageSize > 200 {
+		pageSize = 50
+	}
+	page := filter.Page
+	if page <= 0 {
+		page = 1
+	}
+	where, args := analysisRunWhere(filter)
+	query := `SELECT ` + analysisRunColumns + ` FROM analysis_jobs` + where
 	args = append(args, pageSize, (page-1)*pageSize)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 

@@ -90,14 +90,24 @@ func (b *Binder) Bind(identity Identity, envelope dto.Envelope) (Scoped, error) 
 	if identity.TenantID == "" || identity.UserID == "" {
 		return Scoped{}, ErrNoIdentity
 	}
-	switch {
-	case envelope.Scope.TenantID != identity.TenantID:
+	// An agent credential fixes its tenant and bound user server-side, so an
+	// agent may leave those claims empty and have them filled from the trusted
+	// identity. Any claim it does send must still match exactly; every other
+	// principal must declare the full scope.
+	agentContext := identity.Source == SourceAgentContext
+	if envelope.Scope.TenantID != "" && envelope.Scope.TenantID != identity.TenantID {
 		return Scoped{}, fmt.Errorf("%w: declared tenant %q", ErrCrossTenant, envelope.Scope.TenantID)
-	case envelope.Scope.UserID != identity.UserID:
+	}
+	if envelope.Scope.UserID != "" && envelope.Scope.UserID != identity.UserID {
 		return Scoped{}, fmt.Errorf("%w: declared user %q", ErrForbidden, envelope.Scope.UserID)
 	}
+	if !agentContext && (envelope.Scope.TenantID == "" || envelope.Scope.UserID == "") {
+		return Scoped{}, fmt.Errorf("%w: tenant and user claims are required", ErrForbidden)
+	}
 	if envelope.Principal.Type == "agent" {
-		if identity.AgentID == "" || envelope.Principal.ID != identity.AgentID {
+		// The client-declared id is only a label; the resolved agent identity is
+		// authoritative and is never taken from the envelope.
+		if identity.AgentID == "" {
 			return Scoped{}, fmt.Errorf("%w: agent principal", ErrForbidden)
 		}
 	} else if envelope.Principal.Type == "user" && envelope.Principal.ID != identity.UserID {

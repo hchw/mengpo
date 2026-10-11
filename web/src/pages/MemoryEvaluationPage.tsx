@@ -8,7 +8,17 @@ export interface MemoryEvaluationPageProps {
   api: ConsoleApi;
 }
 
-const METRICS: Array<{ key: keyof EvaluationSnapshot; unit: 'percent' | 'ms' | 'count' | 'usd' }> = [
+type MetricKey =
+  | 'retrieval_precision'
+  | 'promotion_precision'
+  | 'wrong_memory_rate'
+  | 'attribution_accuracy'
+  | 'latency_ms_p95'
+  | 'tokens_per_projection'
+  | 'cost_usd'
+  | 'cache_hit_rate';
+
+const METRICS: Array<{ key: MetricKey; unit: 'percent' | 'ms' | 'count' | 'usd' }> = [
   { key: 'retrieval_precision', unit: 'percent' },
   { key: 'promotion_precision', unit: 'percent' },
   { key: 'wrong_memory_rate', unit: 'percent' },
@@ -69,15 +79,24 @@ export function MemoryEvaluationPage({ api }: MemoryEvaluationPageProps) {
   if (status === 'error' || !snapshot) {
     return <StateView kind="error" error={error} />;
   }
+  const measured = snapshot.has_data !== false;
+  const isMeasured = (key: MetricKey) => measured && (snapshot.measured_metrics ? snapshot.measured_metrics.includes(key) : true);
   return (
     <section aria-labelledby="evaluation-title" className="page page--evaluation">
       <h1 id="evaluation-title">{t('evaluation.title')}</h1>
       <p data-testid="evaluation-generated">{t('evaluation.generated', { time: new Date(snapshot.generated_at).toISOString() })}</p>
+      {measured ? (
+        <p data-testid="evaluation-samples">
+          {t('evaluation.samples', { projections: snapshot.projections ?? 0, samples: snapshot.feedback_samples ?? 0 })}
+        </p>
+      ) : (
+        <p data-testid="evaluation-no-data">{t('evaluation.noData')}</p>
+      )}
       <dl data-testid="evaluation-metrics">
         {METRICS.map((metric) => (
           <div key={metric.key}>
             <dt>{t(`evaluation.${metric.key}`)}</dt>
-            <dd data-testid={`metric-${metric.key}`}>{format(snapshot[metric.key], metric.unit)}</dd>
+            <dd data-testid={`metric-${metric.key}`}>{isMeasured(metric.key) ? format(snapshot[metric.key], metric.unit) : '—'}</dd>
           </div>
         ))}
       </dl>

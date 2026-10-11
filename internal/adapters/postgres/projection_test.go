@@ -189,3 +189,109 @@ func TestFindProjectionResolvesOwnedReference(t *testing.T) {
 		t.Fatalf("cross-tenant error = %v, want ErrProjectionNotFound", err)
 	}
 }
+
+func TestRetrievalTelemetryMetrics(t *testing.T) {
+	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set MEMORY_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.ApplyPlatformMigrations(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	store := registry.NewStore(db)
+	tenant := createMigratedTenant(t, ctx, db, store, "retrieval metrics")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, tenant.ID)
+	})
+	router := tenantdb.NewRouter(db, store)
+	repository := NewProjectionRepository(router)
+
+	const userID = "00000000-0000-4000-8000-000000000051"
+	const sessionID = "00000000-0000-4000-8000-000000000052"
+	const positiveID = "00000000-0000-4000-8000-000000000053"
+	const negativeID = "00000000-0000-4000-8000-000000000054"
+	const otherID = "00000000-0000-4000-8000-000000000055"
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,user_id,status) VALUES($1::uuid,$2::uuid,'active')`, sessionID, userID); err != nil {
+			return err
+		}
+		for i, id := range []string{positiveID, negativeID, otherID} {
+			key := "metrics-memory-" + id
+			if _, err := tx.ExecContext(ctx, `INSERT INTO memory_nodes(id,idempotency_key,user_id,scope_type,scope_id,memory_type,status,visibility,confidence,content,content_text,default_retrieval,version,provenance)
+				VALUES($1::uuid,$2,$3::uuid,'user-global',$3::uuid,'insight','active','private',0.9,'{}'::jsonb,'text',$4,1,'{}'::jsonb)`, id, key, userID, i == 0); err != nil {
+				return err
+			}
+		}
+		events := []struct {
+			id        string
+			cacheHit  bool
+			selected  []string
+			latencyMS int
+		}{
+			{"00000000-0000-4000-8000-000000000061", true, []string{positiveID}, 10},
+			{"00000000-0000-4000-8000-000000000062", true, []string{positiveID}, 20},
+			{"00000000-0000-4000-8000-000000000063", false, []string{negativeID, otherID}, 300},
+		}
+		for _, event := range events {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO retrieval_events(id,user_id,session_id,request_id,query_hash,mode,candidate_count,selected_memory_ids,latency_ms,cache_hit,tokens_injected)
+				VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,'focus',3,$6::uuid[],$7,$8,120)`, event.id, userID, sessionID, "req-"+event.id, "hash-"+event.id, uuidArrayLiteral(event.selected), event.latencyMS, event.cacheHit); err != nil {
+				return err
+			}
+		}
+		feedback := []struct {
+			id, memoryID, kind string
+		}{
+			{"00000000-0000-4000-8000-000000000071", positiveID, "helpful"},
+			{"00000000-0000-4000-8000-000000000072", negativeID, "harmful"},
+		}
+		for _, item := range feedback {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO memory_feedback(id,memory_id,user_id,session_id,feedback_type,request_id)
+				VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,'req')`, item.id, item.memoryID, userID, sessionID, item.kind); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed retrieval telemetry: %v", err)
+	}
+
+	metrics, err := repository.ComputeRetrievalMetrics(ctx, tenant.ID, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ComputeRetrievalMetrics() error = %v", err)
+	}
+	if metrics.Projections != 3 || metrics.CacheHits != 2 {
+		t.Fatalf("projections/hits = %d/%d, want 3/2", metrics.Projections, metrics.CacheHits)
+	}
+	if metrics.CacheHitRate < 0.66 || metrics.CacheHitRate > 0.67 {
+		t.Fatalf("cache hit rate = %v, want ~0.667", metrics.CacheHitRate)
+	}
+	if metrics.LatencyP95Ms != 300 {
+		t.Fatalf("latency p95 = %d, want 300", metrics.LatencyP95Ms)
+	}
+	if metrics.TokensPerProjection != 120 {
+		t.Fatalf("tokens per projection = %v, want 120", metrics.TokensPerProjection)
+	}
+	if metrics.FeedbackSamples != 2 || metrics.PositiveFeedback != 1 || metrics.NegativeFeedback != 1 {
+		t.Fatalf("feedback samples = %#v", metrics)
+	}
+	if metrics.RetrievalPrecision != 0.5 || metrics.WrongMemoryRate != 0.5 {
+		t.Fatalf("precision/wrong = %v/%v, want 0.5/0.5", metrics.RetrievalPrecision, metrics.WrongMemoryRate)
+	}
+
+	// A window with no telemetry reports zero samples rather than a stale rate.
+	empty, err := repository.ComputeRetrievalMetrics(ctx, tenant.ID, time.Now().UTC().Add(time.Hour))
+	if err != nil || empty.Projections != 0 || empty.FeedbackSamples != 0 || empty.CacheHitRate != 0 {
+		t.Fatalf("empty window = %#v err=%v", empty, err)
+	}
+}

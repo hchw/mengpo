@@ -42,7 +42,6 @@ func TestBinderAcceptsMatchingTenantAndRejectsCrossTenant(t *testing.T) {
 	}{
 		{"cross tenant", envelope(dto.Scope{TenantID: "tenant-b", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{}`), ErrCrossTenant},
 		{"cross user", envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-b", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{}`), ErrForbidden},
-		{"wrong agent", envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-z"}, `{}`), ErrForbidden},
 		{"wrong session", envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-z"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{}`), ErrForbidden},
 	}
 	for _, tc := range cases {
@@ -54,6 +53,16 @@ func TestBinderAcceptsMatchingTenantAndRejectsCrossTenant(t *testing.T) {
 	}
 	if _, err := binder.Bind(Identity{}, envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "s"}, dto.Principal{Type: "user", ID: "user-a"}, `{}`)); !errors.Is(err, ErrNoIdentity) {
 		t.Fatalf("empty identity accepted: %v", err)
+	}
+	// The client-declared agent id is only a label; the resolved agent identity
+	// wins and the label never widens or narrows scope.
+	oddLabel, err := binder.Bind(agentIdentity(), envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "mengpo-pi-10.0.0.1"}, `{}`))
+	if err != nil || oddLabel.AgentID != "agent-a" {
+		t.Fatalf("agent label must be ignored: %#v err=%v", oddLabel, err)
+	}
+	// A verified user session cannot claim the agent principal.
+	if _, err := binder.Bind(Identity{TenantID: "tenant-a", UserID: "user-a", Source: SourceVerifiedUser}, envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "user-global"}, dto.Principal{Type: "agent", ID: "mengpo-pi"}, `{}`)); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("user session claiming agent principal accepted: %v", err)
 	}
 }
 

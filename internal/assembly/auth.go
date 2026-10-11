@@ -28,9 +28,22 @@ func (a *AuthAPI) Register(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("POST /api/v1/auth/sso/exchange", a.handleExchange)
+	mux.HandleFunc("POST /api/v1/auth/register", a.handleRegister)
+	mux.HandleFunc("POST /api/v1/auth/login", a.handleLogin)
 	mux.HandleFunc("GET /api/v1/auth/tenants", a.handleTenants)
 	mux.HandleFunc("POST /api/v1/auth/tenant-context", a.handleTenantContext)
 	mux.HandleFunc("POST /api/v1/auth/logout", a.handleLogout)
+}
+
+type registerRequest struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	DisplayName string `json:"display_name"`
+}
+
+type loginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type exchangeRequest struct {
@@ -62,10 +75,67 @@ func (a *AuthAPI) handleExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.setCookie(w, result.Token)
-	writeAPIData(w, http.StatusOK, map[string]any{
+	writeAPIData(w, http.StatusOK, authResponse(result))
+}
+
+func (a *AuthAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var body registerRequest
+	if err := decodeJSONBody(r, &body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	result, err := a.Service.Register(r.Context(), identity.RegisterInput{
+		Email:       body.Email,
+		Password:    body.Password,
+		DisplayName: body.DisplayName,
+	})
+	if err != nil {
+		status, code := registerErrorStatus(err)
+		writeAPIError(w, status, code, err.Error())
+		return
+	}
+	a.setCookie(w, result.Token)
+	writeAPIData(w, http.StatusOK, authResponse(result))
+}
+
+func (a *AuthAPI) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var body loginRequest
+	if err := decodeJSONBody(r, &body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	result, err := a.Service.Login(r.Context(), body.Email, body.Password)
+	if err != nil {
+		if errors.Is(err, identity.ErrInvalidCredentials) || errors.Is(err, identity.ErrAccountDisabled) {
+			writeAPIError(w, http.StatusUnauthorized, "AUTH_FAILED", "email or password is incorrect")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "LOGIN_FAILED", "login failed")
+		return
+	}
+	a.setCookie(w, result.Token)
+	writeAPIData(w, http.StatusOK, authResponse(result))
+}
+
+// registerErrorStatus maps domain registration errors to HTTP responses.
+func registerErrorStatus(err error) (int, string) {
+	switch {
+	case errors.Is(err, identity.ErrInvalidEmail):
+		return http.StatusBadRequest, "INVALID_EMAIL"
+	case errors.Is(err, identity.ErrWeakPassword):
+		return http.StatusBadRequest, "WEAK_PASSWORD"
+	case errors.Is(err, auth.ErrEmailExists):
+		return http.StatusConflict, "EMAIL_TAKEN"
+	default:
+		return http.StatusInternalServerError, "REGISTRATION_FAILED"
+	}
+}
+
+func authResponse(result identity.AuthResult) map[string]any {
+	return map[string]any{
 		"user":    map[string]any{"id": result.User.ID, "email": result.User.Email, "display_name": result.User.DisplayName},
 		"tenants": tenantOptions(result.Tenants),
-	})
+	}
 }
 
 func (a *AuthAPI) handleTenants(w http.ResponseWriter, r *http.Request) {

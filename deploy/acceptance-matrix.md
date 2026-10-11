@@ -69,7 +69,7 @@ and `make test-web`.
 | Requirement | Implementation | Verification |
 | --- | --- | --- |
 | Tenant-scoped API client, pagination, cache, errors | `web/src/api/client.ts` | `client.test.ts` |
-| Login/SSO, tenant list/switch, cache clear | `web/src/auth/*` | `auth.test.tsx` |
+| Register/login (email + password), tenant list/switch, cache clear | `web/src/auth/*` | `auth.test.tsx` |
 | Dashboard / Session Explorer / Background Memory | `web/src/pages/*` | `pages.test.tsx`, `AppRoutes.test.tsx` |
 | Candidate review with optimistic update + conflict | `web/src/pages/CandidateReviewPage.tsx` | `pages.test.tsx` |
 | Projection Debugger | `web/src/pages/ProjectionDebuggerPage.tsx` | `pages.test.tsx` |

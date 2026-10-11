@@ -39,8 +39,35 @@ func stringHex(value [16]byte) string {
 	return string(out)
 }
 
-// TestAuthFlow exercises SSO exchange, session cookie resolution and tenant
-// selection over real HTTP against PostgreSQL.
+// dropUserTenants removes the schemas and tenant rows provisioned for a
+// registered user so integration tests stay idempotent.
+func dropUserTenants(ctx context.Context, t *testing.T, db *sql.DB, email string) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+		SELECT t.id::text, COALESCE(sr.schema_name, '')
+		FROM public.tenants t
+		JOIN public.tenant_memberships m ON m.tenant_id = t.id
+		JOIN public.users u ON u.id = m.user_id
+		LEFT JOIN public.tenant_schema_registry sr ON sr.tenant_id = t.id
+		WHERE u.email = $1`, email)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tenantID, schema string
+		if err := rows.Scan(&tenantID, &schema); err != nil {
+			continue
+		}
+		if schema != "" {
+			_, _ = db.ExecContext(ctx, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		}
+		_, _ = db.ExecContext(ctx, `DELETE FROM public.tenants WHERE id=$1`, tenantID)
+	}
+}
+
+// TestAuthFlow exercises password registration, session cookie resolution and
+// tenant selection over real HTTP against PostgreSQL.
 func TestAuthFlow(t *testing.T) {
 	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -62,6 +89,7 @@ func TestAuthFlow(t *testing.T) {
 	store := registry.NewStore(db)
 	tenant := createMigratedTenant(t, ctx, db, store, "auth flow")
 	t.Cleanup(func() {
+		dropUserTenants(context.Background(), t, db, "owner@example.com")
 		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, tenant.ID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.users WHERE email='owner@example.com'`)
@@ -78,32 +106,41 @@ func TestAuthFlow(t *testing.T) {
 	}
 	handler := server.Handler()
 
-	// Exchange creates the user and issues a session cookie.
-	exchange := httptest.NewRecorder()
-	exchangeRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/exchange", bytes.NewBufferString(`{"assertion":"owner@example.com"}`))
-	exchangeRequest.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(exchange, exchangeRequest)
-	if exchange.Code != http.StatusOK {
-		t.Fatalf("exchange status=%d body=%s", exchange.Code, exchange.Body.String())
+	// Register creates the user, provisions a personal tenant and issues a session cookie.
+	register := httptest.NewRecorder()
+	registerRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBufferString(`{"email":"owner@example.com","password":"supersecret"}`))
+	registerRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(register, registerRequest)
+	if register.Code != http.StatusOK {
+		t.Fatalf("register status=%d body=%s", register.Code, register.Body.String())
 	}
-	cookies := exchange.Result().Cookies()
+	cookies := register.Result().Cookies()
 	if len(cookies) == 0 || cookies[0].Value == "" {
-		t.Fatal("exchange did not set a session cookie")
+		t.Fatal("register did not set a session cookie")
 	}
 	token := cookies[0].Value
-	var exchangeBody struct {
+	var registerBody struct {
 		Data struct {
 			User struct {
 				ID string `json:"id"`
 			} `json:"user"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(exchange.Body.Bytes(), &exchangeBody); err != nil {
+	if err := json.Unmarshal(register.Body.Bytes(), &registerBody); err != nil {
 		t.Fatal(err)
 	}
-	userID := exchangeBody.Data.User.ID
+	userID := registerBody.Data.User.ID
 	if userID == "" {
-		t.Fatal("exchange did not return a user id")
+		t.Fatal("register did not return a user id")
+	}
+
+	// Login with the same credentials must also succeed.
+	login := httptest.NewRecorder()
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"email":"owner@example.com","password":"supersecret"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(login, loginRequest)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
 	}
 
 	// Grant membership, then the tenant list and selection must see it.

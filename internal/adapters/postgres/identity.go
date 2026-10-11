@@ -29,6 +29,7 @@ func (r *IdentityRepository) UpsertUserByEmail(ctx context.Context, user auth.Us
 		VALUES ($1::uuid, $2, $3, $4, $5)
 		ON CONFLICT (email) DO UPDATE SET
 			display_name = EXCLUDED.display_name,
+			password_hash = CASE WHEN EXCLUDED.password_hash <> '' THEN EXCLUDED.password_hash ELSE public.users.password_hash END,
 			updated_at = now()
 		RETURNING id::text, email, display_name, password_hash, status, created_at, updated_at`,
 		user.ID, user.Email, user.DisplayName, user.PasswordHash, userStatus(user.Status)).
@@ -37,6 +38,87 @@ func (r *IdentityRepository) UpsertUserByEmail(ctx context.Context, user auth.Us
 		return auth.User{}, fmt.Errorf("upsert user: %w", err)
 	}
 	return stored, nil
+}
+
+// CreateUser inserts a new user. A duplicate email is reported as
+// auth.ErrEmailExists so the caller can distinguish it from a storage failure.
+func (r *IdentityRepository) CreateUser(ctx context.Context, user auth.User) (auth.User, error) {
+	if user.ID == "" || user.Email == "" {
+		return auth.User{}, errors.New("user id and email are required")
+	}
+	var stored auth.User
+	err := r.db.QueryRowContext(ctx, `
+		INSERT INTO public.users (id, email, display_name, password_hash, status)
+		VALUES ($1::uuid, $2, $3, $4, $5)
+		ON CONFLICT (email) DO NOTHING
+		RETURNING id::text, email, display_name, password_hash, status, created_at, updated_at`,
+		user.ID, user.Email, user.DisplayName, user.PasswordHash, userStatus(user.Status)).
+		Scan(&stored.ID, &stored.Email, &stored.DisplayName, &stored.PasswordHash, &stored.Status, &stored.CreatedAt, &stored.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return auth.User{}, auth.ErrEmailExists
+	}
+	if err != nil {
+		return auth.User{}, fmt.Errorf("create user: %w", err)
+	}
+	return stored, nil
+}
+
+// GetUserByEmail loads one user by their normalized email address.
+func (r *IdentityRepository) GetUserByEmail(ctx context.Context, email string) (auth.User, error) {
+	var stored auth.User
+	err := r.db.QueryRowContext(ctx, `SELECT id::text, email, display_name, password_hash, status, created_at, updated_at FROM public.users WHERE email = $1`, email).
+		Scan(&stored.ID, &stored.Email, &stored.DisplayName, &stored.PasswordHash, &stored.Status, &stored.CreatedAt, &stored.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return auth.User{}, auth.ErrUserNotFound
+	}
+	if err != nil {
+		return auth.User{}, fmt.Errorf("get user by email: %w", err)
+	}
+	return stored, nil
+}
+
+// CreateMembershipWithRole inserts an active membership and grants it the named
+// tenant-scoped role, creating the role when it does not exist yet.
+func (r *IdentityRepository) CreateMembershipWithRole(ctx context.Context, membership auth.TenantMembership, roleName string) error {
+	if membership.ID == "" || membership.UserID == "" || membership.TenantID == "" {
+		return errors.New("membership id, user and tenant are required")
+	}
+	status := membership.Status
+	if status == "" {
+		status = auth.MembershipActive
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin membership: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO public.tenant_memberships (id, user_id, tenant_id, status)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, $4)
+		ON CONFLICT (user_id, tenant_id) DO NOTHING`,
+		membership.ID, membership.UserID, membership.TenantID, string(status)); err != nil {
+		return fmt.Errorf("create membership: %w", err)
+	}
+	if roleName == "" {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO public.roles (id, tenant_id, name) VALUES (gen_random_uuid(), $1::uuid, $2)
+		ON CONFLICT (tenant_id, name) WHERE tenant_id IS NOT NULL DO NOTHING`,
+		membership.TenantID, roleName); err != nil {
+		return fmt.Errorf("create role: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO public.membership_roles (membership_id, role_id)
+		SELECT m.id, r.id
+		FROM public.tenant_memberships m
+		JOIN public.roles r ON r.tenant_id = m.tenant_id AND r.name = $3
+		WHERE m.user_id = $1::uuid AND m.tenant_id = $2::uuid
+		ON CONFLICT DO NOTHING`,
+		membership.UserID, membership.TenantID, roleName); err != nil {
+		return fmt.Errorf("grant role: %w", err)
+	}
+	return tx.Commit()
 }
 
 // CreateMembership inserts an active tenant membership for a user. It is

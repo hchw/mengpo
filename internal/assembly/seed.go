@@ -9,14 +9,17 @@ import (
 	"log/slog"
 
 	"github.com/hchw/mengpo/internal/adapters/postgres"
+	identitypkg "github.com/hchw/mengpo/internal/application/identity"
 	"github.com/hchw/mengpo/internal/domain/auth"
 	"github.com/hchw/mengpo/internal/platform/registry"
 )
 
-// DevSeedEmail is the development account the console signs in with. The
-// internal SSO verifier trusts the typed email as a verified subject, so this
-// address maps to the seeded user.
-const DevSeedEmail = "dev@mengpo.local"
+// DevSeedEmail and DevSeedPassword are the development credentials the console
+// signs in with. The seeded tenant belongs to this account.
+const (
+	DevSeedEmail    = "dev@mengpo.local"
+	DevSeedPassword = "dev-password"
+)
 
 // DevSeed provisions a demo tenant and an active membership so the console is
 // usable end to end in development. It is idempotent and must never run in
@@ -30,11 +33,16 @@ func DevSeed(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	passwordHash, err := identitypkg.HashPassword(DevSeedPassword)
+	if err != nil {
+		return fmt.Errorf("hash seed password: %w", err)
+	}
 	user, err := identity.UpsertUserByEmail(ctx, auth.User{
-		ID:          userID,
-		Email:       DevSeedEmail,
-		DisplayName: "Dev User",
-		Status:      auth.UserActive,
+		ID:           userID,
+		Email:        DevSeedEmail,
+		DisplayName:  "Dev User",
+		PasswordHash: passwordHash,
+		Status:       auth.UserActive,
 	})
 	if err != nil {
 		return fmt.Errorf("seed user: %w", err)

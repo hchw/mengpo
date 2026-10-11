@@ -53,6 +53,10 @@ export function DashboardPage({ api }: DashboardPageProps) {
   if (status === 'empty' || !data) {
     return <StateView kind="empty" description={t('dashboard.empty')} />;
   }
+  const evaluation = data.evaluation;
+  // has_data is false until retrieval telemetry or feedback exists; show that
+  // honestly instead of a 0% that reads like a real measurement.
+  const measured = evaluation.has_data !== false;
   return (
     <section aria-labelledby="dashboard-title" className="page page--dashboard">
       <h1 id="dashboard-title">{t('dashboard.title')}</h1>
@@ -77,8 +81,8 @@ export function DashboardPage({ api }: DashboardPageProps) {
         </article>
         <article className="card">
           <h2>{t('dashboard.evaluation')}</h2>
-          <p data-testid="retrieval-precision">{t('dashboard.retrievalPrecision', { value: `${(data.evaluation.retrieval_precision * 100).toFixed(1)}%` })}</p>
-          <p data-testid="cache-hit-rate">{t('dashboard.cacheHitRate', { value: `${(data.evaluation.cache_hit_rate * 100).toFixed(1)}%` })}</p>
+          <p data-testid="retrieval-precision">{t('dashboard.retrievalPrecision', { value: measured ? `${(evaluation.retrieval_precision * 100).toFixed(1)}%` : t('evaluation.noDataShort') })}</p>
+          <p data-testid="cache-hit-rate">{t('dashboard.cacheHitRate', { value: measured ? `${(evaluation.cache_hit_rate * 100).toFixed(1)}%` : t('evaluation.noDataShort') })}</p>
         </article>
       </div>
     </section>

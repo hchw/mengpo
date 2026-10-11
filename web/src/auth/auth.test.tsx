@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { AuthProvider, useAuth, type AuthApi } from './AuthProvider';
-import { authReducer, initialAuthState, parseSsoCallback } from './auth';
+import { authReducer, initialAuthState } from './auth';
 import type { Tenant } from '../api/types';
 
 const tenants: Tenant[] = [
   { id: 'tenant-a', name: 'Acme', status: 'active', role: 'owner' },
   { id: 'tenant-b', name: 'Globex', status: 'active', role: 'member' },
 ];
+
+const session = { user: { id: 'user-1', email: 'u@example.com' }, tenants, activeTenantId: 'tenant-a' };
 
 function Probe() {
   const auth = useAuth();
@@ -17,7 +19,8 @@ function Probe() {
       <span data-testid="active">{auth.activeTenantId ?? 'none'}</span>
       <span data-testid="tenants">{auth.tenants.map((tenant) => tenant.name).join(',')}</span>
       <span data-testid="error">{auth.error ?? ''}</span>
-      <button onClick={() => void auth.handleSsoCallback('/auth/callback?code=abc&state=xyz')}>login</button>
+      <button onClick={() => void auth.login('u@example.com', 'supersecret')}>login</button>
+      <button onClick={() => void auth.register({ email: 'new@example.com', password: 'supersecret' })}>register</button>
       <button onClick={() => void auth.selectTenant('tenant-b')}>switch</button>
       <button onClick={() => auth.logout()}>logout</button>
     </div>
@@ -26,7 +29,8 @@ function Probe() {
 
 function makeApi(overrides: Partial<AuthApi> = {}): AuthApi {
   return {
-    exchangeSso: vi.fn(async () => ({ user: { id: 'user-1', email: 'u@example.com' }, tenants, activeTenantId: 'tenant-a' })),
+    login: vi.fn(async () => session),
+    register: vi.fn(async () => session),
     listTenants: vi.fn(async () => tenants),
     onTenantChanged: vi.fn(),
     ...overrides,
@@ -46,15 +50,8 @@ describe('authReducer', () => {
   });
 });
 
-describe('parseSsoCallback', () => {
-  it('requires code and state', () => {
-    expect(parseSsoCallback('https://x/auth/callback?code=1&state=2')).toEqual({ code: '1', state: '2' });
-    expect(() => parseSsoCallback('https://x/auth/callback?code=1')).toThrow();
-  });
-});
-
 describe('AuthProvider', () => {
-  it('completes SSO callback, exposes tenants, and clears tenant-scoped cache on switch', async () => {
+  it('completes login, exposes tenants, and clears tenant-scoped cache on switch', async () => {
     const onTenantChanged = vi.fn();
     const api = makeApi({ onTenantChanged });
     render(
@@ -73,8 +70,21 @@ describe('AuthProvider', () => {
     expect(onTenantChanged).toHaveBeenLastCalledWith('tenant-b');
   });
 
+  it('registers a new account and authenticates it', async () => {
+    const register = vi.fn(async () => session);
+    const api = makeApi({ register });
+    render(
+      <AuthProvider api={api}>
+        <Probe />
+      </AuthProvider>,
+    );
+    act(() => screen.getByText('register').click());
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('authenticated'));
+    expect(register).toHaveBeenCalledWith({ email: 'new@example.com', password: 'supersecret' });
+  });
+
   it('reports login failure without leaking the callback error', async () => {
-    const api = makeApi({ exchangeSso: vi.fn(async () => { throw new Error('SSO denied'); }) });
+    const api = makeApi({ login: vi.fn(async () => { throw new Error('login denied'); }) });
     render(
       <AuthProvider api={api}>
         <Probe />
@@ -82,7 +92,7 @@ describe('AuthProvider', () => {
     );
     act(() => screen.getByText('login').click());
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('error'));
-    expect(screen.getByTestId('error').textContent).toBe('SSO denied');
+    expect(screen.getByTestId('error').textContent).toBe('login denied');
   });
 
   it('logs out to the anonymous state', async () => {

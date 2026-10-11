@@ -43,6 +43,7 @@ import (
 var (
 	baseURL     = flag.String("base", envOr("MEMORY_API_URL", "http://localhost:8080"), "Mengpo API base URL")
 	email       = flag.String("email", envOr("VERIFY_EMAIL", "dev@mengpo.local"), "dev account to sign in with")
+	password    = flag.String("password", envOr("VERIFY_PASSWORD", "dev-password"), "dev account password")
 	corpusSize  = flag.Int("corpus", 12, "number of labelled fixture memories to seed (1..len(corpus))")
 	rounds      = flag.Int("rounds", 8, "number of sequential injections to run")
 	tokenBudget = flag.Int("token-budget", 2048, "injection token budget per round")
@@ -125,7 +126,7 @@ func run(ctx context.Context) error {
 	}
 	ok("服务可达")
 
-	step("1. 开发登录 /api/v1/auth/sso/exchange")
+	step("1. 开发登录 /api/v1/auth/login")
 	var exchange struct {
 		Data struct {
 			User struct {
@@ -136,7 +137,13 @@ func run(ctx context.Context) error {
 			} `json:"tenants"`
 		} `json:"data"`
 	}
-	if err := c.post(ctx, "/api/v1/auth/sso/exchange", map[string]any{"assertion": *email}, &exchange); err != nil {
+	loginPayload := map[string]any{"email": *email, "password": *password}
+	if err := c.post(ctx, "/api/v1/auth/login", loginPayload, &exchange); err != nil {
+		// The account may not exist yet; self-service registration also provisions
+		// a personal tenant, so the flow continues unchanged.
+		if registerErr := c.post(ctx, "/api/v1/auth/register", loginPayload, &exchange); registerErr != nil {
+			return fmt.Errorf("登录失败: %w", err)
+		}
 		return fmt.Errorf("登录失败: %w", err)
 	}
 	if exchange.Data.User.ID == "" || len(exchange.Data.Tenants) == 0 {

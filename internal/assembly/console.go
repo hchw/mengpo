@@ -11,7 +11,9 @@ import (
 
 	"github.com/hchw/mengpo/internal/api/dto"
 	"github.com/hchw/mengpo/internal/application/agentaccess"
+	"github.com/hchw/mengpo/internal/application/agents"
 	"github.com/hchw/mengpo/internal/application/governance"
+	"github.com/hchw/mengpo/internal/application/tenants"
 	"github.com/hchw/mengpo/internal/domain/auth"
 	"github.com/hchw/mengpo/internal/domain/memory"
 	"github.com/hchw/mengpo/internal/ports"
@@ -21,15 +23,16 @@ import (
 // uses. Every request is a v1 Envelope; scope and principal are re-validated
 // against the verified identity before any repository call.
 type ConsoleAPI struct {
-	Memories   ports.MemoryNodeRepository
-	List       ports.MemoryListRepository
-	Merge      ports.MemoryMergeRepository
-	Sessions   ports.SessionListRepository
-	Governance *governance.Service
-	Members    MemberLister
-	Agents     AgentLister
-	Runs       ports.AnalysisRunStore
-	Triage     ports.CandidateTriageReader
+	Memories       ports.MemoryNodeRepository
+	List           ports.MemoryListRepository
+	Merge          ports.MemoryMergeRepository
+	Sessions       ports.SessionListRepository
+	Governance     *governance.Service
+	Members        MemberLister
+	Agents         AgentLister
+	AgentRegistrar AgentRegistrar
+	Triage         ports.CandidateTriageReader
+	Metrics        ports.RetrievalMetricsReader
 }
 
 // MemberLister lists tenant members.
@@ -41,6 +44,11 @@ type MemberLister interface {
 type AgentLister interface {
 	ListAgents(ctx context.Context, tenantID string) ([]auth.Agent, error)
 	DisableAgent(ctx context.Context, agentID string) error
+}
+
+// AgentRegistrar creates a tenant-bound agent and returns its one-time secret.
+type AgentRegistrar interface {
+	Register(ctx context.Context, tenantContext tenants.ActiveTenantContext, request agents.RegisterRequest) (auth.Agent, string, error)
 }
 
 // Register mounts the console endpoints. It is a no-op when unconfigured.
@@ -61,6 +69,9 @@ func (c *ConsoleAPI) Register(mux *http.ServeMux) {
 	if c.Agents != nil {
 		mux.HandleFunc("POST /api/v1/agents", c.handleAgents)
 		mux.HandleFunc("POST /api/v1/agents/{id}/disable", c.handleDisableAgent)
+	}
+	if c.AgentRegistrar != nil {
+		mux.HandleFunc("POST /api/v1/agents/register", c.handleRegisterAgent)
 	}
 }
 
@@ -425,18 +436,51 @@ func (c *ConsoleAPI) handleFailures(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *ConsoleAPI) handleEvaluation(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := c.bind(r); err != nil {
+	_, scoped, err := c.bind(r)
+	if err != nil {
 		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}
-	// Evaluation is produced offline; expose a zeroed snapshot with an explicit
-	// generated_at so the console can render "no data yet".
-	writeAPIData(w, http.StatusOK, map[string]any{
-		"generated_at":        time.Now().UTC().Format(time.RFC3339),
-		"retrieval_precision": 0, "promotion_precision": 0, "wrong_memory_rate": 0,
-		"attribution_accuracy": 0, "latency_ms_p95": 0, "tokens_per_projection": 0,
-		"cost_usd": 0, "cache_hit_rate": 0,
-	})
+	// Evaluation is computed from recorded retrieval telemetry and the feedback
+	// left on injected memories over a rolling window. has_data distinguishes
+	// "measured 0%" from "nothing recorded yet"; projections/feedback_samples
+	// state the sample size behind each rate.
+	snapshot := map[string]any{
+		"generated_at":          time.Now().UTC().Format(time.RFC3339),
+		"retrieval_precision":   0,
+		"promotion_precision":   0,
+		"wrong_memory_rate":     0,
+		"attribution_accuracy":  0,
+		"latency_ms_p95":        0,
+		"tokens_per_projection": 0,
+		"cost_usd":              0,
+		"cache_hit_rate":        0,
+		"projections":           0,
+		"feedback_samples":      0,
+		"has_data":              false,
+		"measured_metrics":      []string{},
+	}
+	if c == nil || c.Metrics == nil {
+		writeAPIData(w, http.StatusOK, snapshot)
+		return
+	}
+	metrics, err := c.Metrics.ComputeRetrievalMetrics(r.Context(), scoped.TenantID, time.Now().UTC().Add(-30*24*time.Hour))
+	if err != nil {
+		writeAPIData(w, http.StatusOK, snapshot)
+		return
+	}
+	snapshot["retrieval_precision"] = metrics.RetrievalPrecision
+	snapshot["wrong_memory_rate"] = metrics.WrongMemoryRate
+	snapshot["latency_ms_p95"] = metrics.LatencyP95Ms
+	snapshot["tokens_per_projection"] = metrics.TokensPerProjection
+	snapshot["cache_hit_rate"] = metrics.CacheHitRate
+	snapshot["projections"] = metrics.Projections
+	snapshot["feedback_samples"] = metrics.FeedbackSamples
+	snapshot["has_data"] = metrics.Projections > 0 || metrics.FeedbackSamples > 0
+	// Only these are computed from telemetry; the rest stay 0 and are declared
+	// unmeasured so the console can render them as "—" rather than a fake 0%.
+	snapshot["measured_metrics"] = []string{"retrieval_precision", "wrong_memory_rate", "cache_hit_rate", "latency_ms_p95", "tokens_per_projection"}
+	writeAPIData(w, http.StatusOK, snapshot)
 }
 
 func (c *ConsoleAPI) handleMembers(w http.ResponseWriter, r *http.Request) {
@@ -473,6 +517,71 @@ func (c *ConsoleAPI) handleAgents(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{"id": agent.ID, "name": agent.Name, "status": agent.Status, "capabilities": agent.Capabilities, "allowed_scopes": agent.AllowedScopes})
 	}
 	writeAPIData(w, http.StatusOK, map[string]any{"items": items, "total": len(items), "page": 1, "page_size": len(items)})
+}
+
+type registerAgentPayload struct {
+	Name              string   `json:"name"`
+	AllowedUserIDs    []string `json:"allowed_user_ids"`
+	AllowedSessionIDs []string `json:"allowed_session_ids"`
+	AllowedScopes     []string `json:"allowed_scopes"`
+	Capabilities      []string `json:"capabilities"`
+}
+
+// handleRegisterAgent creates a tenant-bound agent. Only tenant admins may do
+// so; the raw credential is returned exactly once and never stored in the clear.
+func (c *ConsoleAPI) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
+	envelope, scoped, err := c.bind(r)
+	if err != nil {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	identity, ok := agentaccess.IdentityFromContext(r.Context())
+	if !ok || !rolesAllowAgentAdmin(identity.Roles) {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "agent.manage is required")
+		return
+	}
+	var payload registerAgentPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "agent registration payload is invalid")
+		return
+	}
+	agent, secret, err := c.AgentRegistrar.Register(r.Context(), tenants.ActiveTenantContext{
+		UserID:      scoped.UserID,
+		Tenant:      auth.Tenant{ID: scoped.TenantID, Status: auth.TenantActive},
+		Permissions: []string{agents.PermissionManageAgent},
+	}, agents.RegisterRequest{
+		Name:              strings.TrimSpace(payload.Name),
+		AllowedUserIDs:    payload.AllowedUserIDs,
+		AllowedSessionIDs: payload.AllowedSessionIDs,
+		AllowedScopes:     payload.AllowedScopes,
+		Capabilities:      payload.Capabilities,
+	})
+	if err != nil {
+		if errors.Is(err, agents.ErrInvalidAgent) || errors.Is(err, agents.ErrForbidden) {
+			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "MUTATION_FAILED", "unable to register agent")
+		return
+	}
+	writeAPIData(w, http.StatusOK, map[string]any{
+		"id":             agent.ID,
+		"name":           agent.Name,
+		"status":         agent.Status,
+		"capabilities":   agent.Capabilities,
+		"allowed_scopes": agent.AllowedScopes,
+		"secret":         secret,
+	})
+}
+
+func rolesAllowAgentAdmin(roles []string) bool {
+	for _, role := range roles {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "owner", "admin", "administrator", "tenant-admin":
+			return true
+		}
+	}
+	return false
 }
 
 func (c *ConsoleAPI) handleDisableAgent(w http.ResponseWriter, r *http.Request) {
@@ -514,40 +623,6 @@ func (c *ConsoleAPI) bind(r *http.Request) (dto.Envelope, agentaccess.Scoped, er
 		return dto.Envelope{}, agentaccess.Scoped{}, err
 	}
 	return envelope, scoped, nil
-}
-
-func (c *ConsoleAPI) evaluationSnapshot(ctx context.Context) map[string]any {
-	snapshot := map[string]any{
-		"generated_at":          time.Now().UTC().Format(time.RFC3339),
-		"retrieval_precision":   0,
-		"promotion_precision":   0,
-		"wrong_memory_rate":     0,
-		"attribution_accuracy":  0,
-		"latency_ms_p95":        0,
-		"tokens_per_projection": 0,
-		"cost_usd":              0,
-		"cache_hit_rate":        0,
-	}
-	if c == nil || c.Runs == nil {
-		return snapshot
-	}
-	identity, ok := agentaccess.IdentityFromContext(ctx)
-	if !ok || identity.TenantID == "" {
-		return snapshot
-	}
-	runs, err := c.Runs.ListAnalysisRuns(ctx, identity.TenantID, ports.AnalysisRunFilter{TaskType: "evaluate_feedback", Page: 1, PageSize: 1})
-	if err != nil || len(runs) == 0 {
-		return snapshot
-	}
-	var metrics map[string]any
-	if json.Unmarshal(runs[0].Result, &metrics) != nil {
-		return snapshot
-	}
-	for key, value := range metrics {
-		snapshot[key] = value
-	}
-	snapshot["generated_at"] = runs[0].CreatedAt.UTC().Format(time.RFC3339)
-	return snapshot
 }
 
 func itemFor(node ports.MemoryNodeRecord) map[string]any {

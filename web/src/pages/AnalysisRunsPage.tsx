@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
 import type { ConsoleApi } from '../api/console';
 import type { AnalysisRun, AnalysisRunDetail, ScheduleStatus } from '../api/types';
+import { Pagination } from '../components/Pagination';
 import { StateView } from '../components/states';
 import { useI18n } from '../i18n';
 import { AnalysisRunDetailDialog } from './AnalysisRunDetailDialog';
+
+const PAGE_SIZE = 20;
 
 export interface AnalysisRunsPageProps {
   api: ConsoleApi;
@@ -23,6 +26,9 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
   const [error, setError] = useState<unknown>();
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const [schedule, setSchedule] = useState<ScheduleStatus>();
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [nonce, setNonce] = useState(0);
   const [detailRunId, setDetailRunId] = useState<string>();
   const [detail, setDetail] = useState<AnalysisRunDetail>();
   const [detailLoading, setDetailLoading] = useState(false);
@@ -30,12 +36,15 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.listAnalysisRuns(1, 50), api.listSchedules()])
+    setStatus('loading');
+    Promise.all([api.listAnalysisRuns(page, PAGE_SIZE), api.listSchedules()])
       .then(([runsPage, schedules]) => {
         if (cancelled) return;
-        setRuns(runsPage.items ?? []);
+        const items = runsPage.items ?? [];
+        setRuns(items);
+        setTotal(runsPage.total ?? items.length);
         setSchedule((schedules.items ?? [])[0]);
-        setStatus((runsPage.items ?? []).length === 0 ? 'empty' : 'ready');
+        setStatus((runsPage.total ?? items.length) === 0 ? 'empty' : 'ready');
       })
       .catch((cause) => {
         if (cancelled) return;
@@ -45,7 +54,7 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, page, nonce]);
 
   const openDetail = (id: string) => {
     setDetailRunId(id);
@@ -64,7 +73,7 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
     return <StateView kind="loading" />;
   }
   if (status === 'error') {
-    return <StateView kind="error" error={error} />;
+    return <StateView kind="error" error={error} onRetry={() => setNonce((value) => value + 1)} />;
   }
   const failing = schedule && schedule.last_status === 'error';
   return (
@@ -87,40 +96,43 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
       {status === 'empty' ? (
         <StateView kind="empty" description={t('curation.empty')} />
       ) : (
-        <table data-testid="analysis-runs">
-          <thead>
-            <tr>
-              <th>{t('curation.task')}</th>
-              <th>{t('curation.trigger')}</th>
-              <th>{t('curation.model')}</th>
-              <th>{t('curation.status')}</th>
-              <th>{t('curation.candidates')}</th>
-              <th>{t('curation.tokens')}</th>
-              <th>{t('curation.latency')}</th>
-              <th>{t('curation.when')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((run) => (
-              <tr key={run.id} data-testid={`analysis-run-${run.id}`}>
-                <td>
-                  <button type="button" className="run-link" onClick={() => openDetail(run.id)}>
-                    {tEnum('curation.task', run.task_type)}
-                  </button>
-                </td>
-                <td>{tEnum('curation.trigger', run.trigger)}</td>
-                <td>{run.model || run.provider}</td>
-                <td data-status={run.status}>
-                  {tEnum('curation.status', run.status)} {run.degraded_reason ? ` (${tEnum('curation.degraded', run.degraded_reason)})` : ''}
-                </td>
-                <td>{run.candidate_count}</td>
-                <td>{run.tokens_prompt + run.tokens_completion}</td>
-                <td>{run.latency_ms} ms</td>
-                <td>{formatTime(run.created_at)}</td>
+        <>
+          <table data-testid="analysis-runs">
+            <thead>
+              <tr>
+                <th>{t('curation.task')}</th>
+                <th>{t('curation.trigger')}</th>
+                <th>{t('curation.model')}</th>
+                <th>{t('curation.status')}</th>
+                <th>{t('curation.candidates')}</th>
+                <th>{t('curation.tokens')}</th>
+                <th>{t('curation.latency')}</th>
+                <th>{t('curation.when')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {runs.map((run) => (
+                <tr key={run.id} data-testid={`analysis-run-${run.id}`}>
+                  <td>
+                    <button type="button" className="run-link" onClick={() => openDetail(run.id)}>
+                      {tEnum('curation.task', run.task_type)}
+                    </button>
+                  </td>
+                  <td>{tEnum('curation.trigger', run.trigger)}</td>
+                  <td>{run.model || run.provider}</td>
+                  <td data-status={run.status}>
+                    {tEnum('curation.status', run.status)} {run.degraded_reason ? ` (${tEnum('curation.degraded', run.degraded_reason)})` : ''}
+                  </td>
+                  <td>{run.candidate_count}</td>
+                  <td>{run.tokens_prompt + run.tokens_completion}</td>
+                  <td>{run.latency_ms} ms</td>
+                  <td>{formatTime(run.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pagination page={page} pageSize={PAGE_SIZE} total={total} onPageChange={setPage} />
+        </>
       )}
       {detailRunId ? (
         <AnalysisRunDetailDialog detail={detail} loading={detailLoading} error={detailError} onClose={closeDetail} />

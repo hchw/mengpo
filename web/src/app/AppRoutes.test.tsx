@@ -16,7 +16,8 @@ const authenticated: AuthState = {
 };
 
 const authApi: AuthApi = {
-  exchangeSso: async () => ({ user: authenticated.user!, tenants: authenticated.tenants, activeTenantId: 'tenant-a' }),
+  register: async () => ({ user: authenticated.user!, tenants: authenticated.tenants, activeTenantId: 'tenant-a' }),
+  login: async () => ({ user: authenticated.user!, tenants: authenticated.tenants, activeTenantId: 'tenant-a' }),
   listTenants: async () => authenticated.tenants,
 };
 
