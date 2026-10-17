@@ -116,7 +116,6 @@ func TestDeployManifestsUseCanonicalNames(t *testing.T) {
 	}
 	allowedExtra := map[string]bool{
 		"MEMORY_TEST_DATABASE_URL": true,
-		"MEMORY_TEST_REDIS_URL":    true,
 	}
 	for path, content := range files {
 		for _, name := range extractEnvNames(content) {

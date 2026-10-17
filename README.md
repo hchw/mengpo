@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE">License: Apache-2.0</a> ·
-  Go 1.24 · PostgreSQL + pgvector · NATS · React
+  Go 1.24 · PostgreSQL + pgvector · React
 </p>
 
 ---
@@ -40,7 +40,7 @@
 
 ### 🔒 租户级物理隔离
 - **Tenant-per-Schema**：每个租户拥有独立 PostgreSQL Schema，`search_path` 事务级路由，禁止跨租户查询。
-- **全链路 tenant identity**：Repository、缓存 Key、任务队列、Embedding Job、LLM 分析批次、Redis 缓存与指标全部携带租户身份，并有跨租户污染测试兜底。
+- **全链路 tenant identity**：Repository、缓存 Key、任务队列、Embedding Job、LLM 分析批次与指标全部携带租户身份，并有跨租户污染测试兜底。
 - **准入与隔离**：Agent Handshake（注册 / 凭证 / 能力协商 / 租户绑定）、Level 0/1/2 接入，未绑定事件进入 Quarantine。
 
 ### 🔎 可解释的混合召回
@@ -54,13 +54,13 @@
 - **Observation Gateway**：旁路事件先落 `observed_events` 原始表，不直接写长期记忆。
 - **Memory LLM 分析**：事件分类、失败分析、记忆规整、冲突分析，结构化输出校验、模型版本管理与重试降级。
 - **规则降级**：Provider 不可用时退回规则分析，且降级不创建记忆。
-- **异步任务**：PostgreSQL outbox/job 为可靠性事实来源，NATS 仅作唤醒通知（可退回轮询）。
+- **异步任务**：PostgreSQL outbox/job 为可靠性事实来源；任务由 PostgreSQL 轮询发现，不依赖外部消息中间件。
 
 ### 📊 评估、可观测与运维
 - **评估集与指标**：dataset / golden snapshot / feedback metrics，支持回归对比。
 - **可观测性**：结构化日志、trace、按租户标注的 Prometheus 指标。
 - **安全审计与告警**：安全事件日志、导出/删除授权、故障演练与告警规则。
-- **一键部署**：`docker compose` 拉起 Postgres+pgvector、Redis、NATS、API、Worker 与 Console。
+- **一键部署**：`docker compose` 拉起 Postgres+pgvector、API、Worker 与 Console。
 
 ### 🖥️ React 记忆控制台
 Dashboard、Session Explorer、Candidate Review、Projection Debugger、Failure Analysis、Memory Evaluation、Members 与 Settings 页面，支持租户登录、切换与权限管理。
@@ -72,7 +72,7 @@ Dashboard、Session Explorer、Candidate Review、Projection Debugger、Failure 
 需要 Docker 与 Docker Compose：
 
 ```bash
-make dev          # 构建并启动 Postgres+pgvector、Redis、NATS、API、Worker、Console
+make dev          # 构建并启动 Postgres+pgvector、API、Worker、Console
 make dev-logs     # 查看日志
 make dev-down     # 停止并清空数据卷
 ```
@@ -99,11 +99,10 @@ go run ./cmd/memory-worker   # 启动异步 Worker
 | --- | --- |
 | `HTTP_ADDR` | API 监听地址，默认 `:8080` |
 | `DATABASE_URL` | PostgreSQL 连接串（必需） |
-| `MQ_ADAPTER` / `MQ_URL` | 队列适配器（`nats-core` / `none`）与地址；`none` 时退回数据库轮询 |
+| `MEMORY_QUEUE_ADAPTER` | 队列适配器，仅支持 `none`（任务由 PostgreSQL 轮询发现） |
 | `EMBEDDING_ENABLED` / `EMBEDDING_ARTIFACT` | 本地 Embedding（默认 `models/bge-small-zh-v1.5-Q8_0.gguf`，中文/多语，512 维，CLS pooling） |
 | `MEMORY_LLM_ENABLED` / `MEMORY_LLM_BASE_URL` / `MEMORY_LLM_MODEL` | Memory LLM 分析 Provider |
 | `RERANKER_ENABLED` / `RERANKER_BASE_URL` / `RERANKER_MODEL` | 独立 Reranker |
-| `MEMORY_REDIS_URL` | 租户隔离缓存（可选） |
 | `AUTH_SESSION_TTL` / `AUTH_COOKIE_SECURE` | 会话与 Cookie 安全策略 |
 
 > 默认所有外部 Provider 均关闭：未显式启用时，服务以规则/结构化路径降级运行。
@@ -122,8 +121,6 @@ make fmt          # 格式化 Go 与前端
 
 ```bash
 MEMORY_TEST_DATABASE_URL='postgres://test:test@127.0.0.1:55432/test?sslmode=disable' go test ./...
-MEMORY_TEST_REDIS_URL='redis://127.0.0.1:56379/0' go test ./internal/adapters/redis/...
-NATS_TEST_URL='nats://127.0.0.1:54222' go test ./internal/adapters/nats/...
 ```
 
 ### 前端控制台

@@ -538,6 +538,73 @@ func TestIdenticalConsolidationReusesCachedResult(t *testing.T) {
 	}
 }
 
+// TestConsolidationWithoutCacheMatchesCachedResult proves the database-backed
+// cache is a pure optimisation: with no cache every identical job calls the
+// model, but the persisted candidates are identical to the cached path.
+func TestConsolidationWithoutCacheMatchesCachedResult(t *testing.T) {
+	events := []ports.PendingAnalysisEvent{
+		{NormalizedID: "n-a", RawEventID: "raw-a", SessionID: "session-1", OccurredAt: time.Now().UTC(), Payload: json.RawMessage(`{"text":"a"}`)},
+	}
+	newRun := func() (*JobDispatcher, *countingAnalyst, *fakeCandidateWriter) {
+		analyst := &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
+			CandidateID: "cache-equiv-1", EvidenceEventIDs: []string{"raw-a"}, ScopeType: "user-global", ScopeID: "user-1",
+			Content: json.RawMessage(`{"text":"equivalent"}`), Confidence: 0.6,
+		}}}}
+		candidates := &fakeCandidateWriter{}
+		dispatcher := dispatcherFor(t, observation.Event{}, analyst, candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+		dispatcher.AnalysisReader = fakeAnalysisReader{events: events}
+		return dispatcher, analyst, candidates
+	}
+	payload, _ := json.Marshal(map[string]any{"raw_event_ids": []string{"raw-a"}})
+	job := ports.OutboxJob{TenantID: "tenant-a", JobType: JobConsolidate, Payload: payload}
+
+	uncached, uncachedAnalyst, uncachedRecords := newRun()
+	for _, id := range []string{"job-nil-1", "job-nil-2"} {
+		job.ID = id
+		if err := uncached.Handle(context.Background(), job); err != nil {
+			t.Fatalf("Handle(%s) error = %v", id, err)
+		}
+	}
+	if uncachedAnalyst.calls != 2 {
+		t.Fatalf("nil cache called the model %d times, want 2", uncachedAnalyst.calls)
+	}
+
+	cached, cachedAnalyst, cachedRecords := newRun()
+	cached.Cache = &fakeCache{}
+	for _, id := range []string{"job-hit-1", "job-hit-2"} {
+		job.ID = id
+		if err := cached.Handle(context.Background(), job); err != nil {
+			t.Fatalf("Handle(%s) error = %v", id, err)
+		}
+	}
+	if cachedAnalyst.calls != 1 {
+		t.Fatalf("cached path called the model %d times, want 1", cachedAnalyst.calls)
+	}
+
+	if len(uncachedRecords.records) != len(cachedRecords.records) {
+		t.Fatalf("record counts differ: nil=%d cached=%d", len(uncachedRecords.records), len(cachedRecords.records))
+	}
+	for i := range uncachedRecords.records {
+		// Node and evidence IDs are freshly generated per write, so compare the
+		// durable content with those identifiers blanked out.
+		nilRecord := uncachedRecords.records[i]
+		cachedRecord := cachedRecords.records[i]
+		nilRecord.Node.ID = ""
+		cachedRecord.Node.ID = ""
+		for j := range nilRecord.Evidence {
+			nilRecord.Evidence[j].MemoryID = ""
+		}
+		for j := range cachedRecord.Evidence {
+			cachedRecord.Evidence[j].MemoryID = ""
+		}
+		nilJSON, _ := json.Marshal(nilRecord)
+		cachedJSON, _ := json.Marshal(cachedRecord)
+		if string(nilJSON) != string(cachedJSON) {
+			t.Fatalf("record %d differs: nil=%s cached=%s", i, nilJSON, cachedJSON)
+		}
+	}
+}
+
 type fakeAudit struct{ events []ports.AuditEventRecord }
 
 func (f *fakeAudit) RecordAuditEvent(_ context.Context, _ string, event ports.AuditEventRecord) error {

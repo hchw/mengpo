@@ -32,7 +32,7 @@ func TestLoadFromUsesSafeDefaults(t *testing.T) {
 	if cfg.Providers.Embedding.ModelID != DefaultEmbeddingModel || cfg.Providers.Embedding.Dimensions != DefaultEmbeddingDim {
 		t.Fatalf("unexpected embedding defaults: %#v", cfg.Providers.Embedding)
 	}
-	if cfg.Queue.Adapter != "nats-core" || cfg.Scopes[0] != "user-global" || cfg.Scopes[1] != "session" {
+	if cfg.Queue.Adapter != "none" || cfg.Scopes[0] != "user-global" || cfg.Scopes[1] != "session" {
 		t.Fatalf("unexpected queue/scope defaults: %#v / %#v", cfg.Queue, cfg.Scopes)
 	}
 }

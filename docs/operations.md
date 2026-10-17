@@ -11,22 +11,22 @@ procedure below has a matching drill in the test suite or a `make` target.
 | API | `cmd/memory-server` (`deploy/Dockerfile` with `SERVICE=memory-server`) | Observe / Project / Consolidate / Feedback / Session HTTP API |
 | Worker | `cmd/memory-worker` (`SERVICE=memory-worker`) | Durable outbox jobs: normalize, analyze, embed, consolidate |
 | Console | `deploy/Dockerfile.console` | React Memory Console served by nginx, proxying `/api` and `/auth` |
-| PostgreSQL + pgvector | `pgvector/pgvector:pg16` | Tenant-per-schema storage, vector index, outbox, audit |
-| Redis | `redis:7-alpine` | Tenant-scoped cache (keys embed tenant id) |
-| NATS | `nats:2.10-alpine` | Wake-up notifications only (not a durability boundary) |
+| PostgreSQL + pgvector | `pgvector/pgvector:pg16` | Tenant-per-schema storage, vector index, outbox, audit, consolidate cache |
 
-NATS is **not** the source of truth. PostgreSQL outbox jobs are durable; a
-missed NATS notification is harmless because the worker independently polls.
+PostgreSQL is the single source of truth. Outbox jobs are durable and claimed
+under leases; the worker discovers them by polling (default every second), so
+no message broker is required. The consolidate result cache is also stored in
+the tenant schema.
 
 ## 2. Single-machine development
 
 ```bash
-make dev          # docker compose up --build (Postgres, NATS, API, worker, console)
+make dev          # docker compose up --build (Postgres, API, worker, console)
 make dev-down     # tear down including volumes
 ```
 
 The compose file is `deploy/dev/docker-compose.yml`. Console: http://localhost:5173.
-API: http://localhost:8080. NATS monitoring: http://localhost:8222.
+API: http://localhost:8080.
 
 ## 3. Production deployment
 
@@ -46,10 +46,8 @@ API: http://localhost:8080. NATS monitoring: http://localhost:8222.
 | Variable | Purpose |
 | --- | --- |
 | `MEMORY_DATABASE_URL` | PostgreSQL DSN (per environment) |
-| `MEMORY_NATS_URL` | NATS URL; optional (worker falls back to polling) |
-| `MEMORY_REDIS_URL` | Redis URL for the tenant-scoped cache |
 | `MEMORY_HTTP_ADDR` | API listen address |
-| `MEMORY_QUEUE_ADAPTER` | `nats-core` (default) or `none` for PostgreSQL polling only |
+| `MEMORY_QUEUE_ADAPTER` | Only `none` is supported: job discovery is PostgreSQL polling |
 | `MEMORY_EMBEDDING_ARTIFACT` | Path to the local embedding GGUF artifact |
 | `MEMORY_MIGRATE_ON_START` | Run platform migrations on startup (default `true`) |
 | `MEMORY_SCHEDULER_ADAPTER` | Periodic scheduler: `internal` (default) or `none` |
@@ -58,8 +56,8 @@ API: http://localhost:8080. NATS monitoring: http://localhost:8222.
 | `MEMORY_CONFIG_MASTER_KEY` | 32-byte master key (base64/hex/raw) encrypting per-tenant provider secrets |
 
 All keys use the `MEMORY_` prefix; unprefixed legacy names (for example
-`DATABASE_URL`, `HTTP_ADDR`, `MQ_URL`) are accepted during the migration window
-only. See `.env.example` for the full canonical list.
+`DATABASE_URL`, `HTTP_ADDR`, `MQ_ADAPTER`) are accepted during the migration
+window only. See `.env.example` for the full canonical list.
 
 ### Secrets
 

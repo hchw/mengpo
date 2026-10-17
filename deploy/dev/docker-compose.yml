@@ -2,8 +2,8 @@
 #
 #   docker compose -f deploy/dev/docker-compose.yml up --build
 #
-# Services: pgvector PostgreSQL, NATS (wake-up notifications only), the Go API,
-# the Go worker, and the React console served by nginx.
+# Services: pgvector PostgreSQL, the Go API, the Go worker, and the React
+# console served by nginx.
 name: mengpo-dev
 
 services:
@@ -23,28 +23,6 @@ services:
     volumes:
       - mengpo-postgres:/var/lib/postgresql/data
 
-  redis:
-    image: m.daocloud.io/docker.io/redis:7-alpine
-    ports:
-      - "56379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  nats:
-    image: m.daocloud.io/docker.io/nats:2.10-alpine
-    command: ["-js", "-m", "8222"]
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   memory-server:
     build:
       context: ../..
@@ -54,23 +32,17 @@ services:
         SERVICE: memory-server
     environment:
       MEMORY_DATABASE_URL: postgres://mengpo:mengpo@postgres:5432/mengpo?sslmode=disable
-      MEMORY_NATS_URL: nats://nats:4222
-      MEMORY_REDIS_URL: redis://redis:6379/0
       MEMORY_HTTP_ADDR: ":8080"
       MEMORY_EMBEDDING_ENABLED: "true"
       MEMORY_EMBEDDING_BINARY: llama-embedding
       MEMORY_EMBEDDING_ARTIFACT: /app/models/bge-small-zh-v1.5-Q8_0.gguf
-      MEMORY_QUEUE_ADAPTER: nats-core
+      MEMORY_QUEUE_ADAPTER: none
       MEMORY_CONFIG_MASTER_KEY: ${MEMORY_CONFIG_MASTER_KEY:-mengpo-dev-master-key--32bytes--}
       MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS: "true"
     ports:
       - "8080:8080"
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      nats:
         condition: service_healthy
 
   memory-worker:
@@ -82,12 +54,10 @@ services:
         SERVICE: memory-worker
     environment:
       MEMORY_DATABASE_URL: postgres://mengpo:mengpo@postgres:5432/mengpo?sslmode=disable
-      MEMORY_NATS_URL: nats://nats:4222
-      MEMORY_REDIS_URL: redis://redis:6379/0
       MEMORY_EMBEDDING_ENABLED: "true"
       MEMORY_EMBEDDING_BINARY: llama-embedding
       MEMORY_EMBEDDING_ARTIFACT: /app/models/bge-small-zh-v1.5-Q8_0.gguf
-      MEMORY_QUEUE_ADAPTER: nats-core
+      MEMORY_QUEUE_ADAPTER: none
       MEMORY_SCHEDULER_ADAPTER: internal
       MEMORY_SCHEDULE_DEFAULT_INTERVAL: 24h
       MEMORY_SESSION_RETENTION: 168h
@@ -95,8 +65,6 @@ services:
       MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS: "true"
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
 
   console:

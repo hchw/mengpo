@@ -35,7 +35,6 @@ type Config struct {
 	ReadHeaderTimeout time.Duration
 	RequestTimeout    time.Duration
 	DatabaseURL       string
-	RedisURL          string
 	MigrateOnStart    bool
 	// DevSeed provisions a demo tenant and membership so the console is usable in development.
 	// It defaults to true outside production and is ignored in production.
@@ -115,7 +114,6 @@ type RerankerConfig struct {
 
 type QueueConfig struct {
 	Adapter string
-	URL     string
 }
 
 type SecurityConfig struct {
@@ -140,7 +138,6 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		ReadHeaderTimeout: 5 * time.Second,
 		RequestTimeout:    30 * time.Second,
 		DatabaseURL:       strings.TrimSpace(envString(lookup, envNames("MEMORY_DATABASE_URL", "DATABASE_URL"), "")),
-		RedisURL:          strings.TrimSpace(envString(lookup, envNames("MEMORY_REDIS_URL"), "")),
 		MigrateOnStart:    true,
 		Auth: AuthConfig{
 			SessionTTL:              12 * time.Hour,
@@ -177,8 +174,7 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 			},
 		},
 		Queue: QueueConfig{
-			Adapter: envString(lookup, envNames("MEMORY_QUEUE_ADAPTER", "MQ_ADAPTER"), "nats-core"),
-			URL:     envString(lookup, envNames("MEMORY_NATS_URL", "MQ_URL"), "nats://127.0.0.1:4222"),
+			Adapter: envString(lookup, envNames("MEMORY_QUEUE_ADAPTER", "MQ_ADAPTER"), "none"),
 		},
 		Security: SecurityConfig{
 			MaxRequestBytes: 1 << 20,
@@ -316,11 +312,8 @@ func (c Config) Validate() error {
 	if c.Scheduler.SessionRetention <= 0 {
 		return errors.New("MEMORY_SESSION_RETENTION must be positive")
 	}
-	if c.Queue.Adapter != "nats-core" && c.Queue.Adapter != "none" {
-		return fmt.Errorf("unsupported MEMORY_QUEUE_ADAPTER/MQ_ADAPTER %q", c.Queue.Adapter)
-	}
-	if c.Queue.Adapter == "nats-core" && c.Queue.URL == "" {
-		return errors.New("MEMORY_NATS_URL is required when MEMORY_QUEUE_ADAPTER=nats-core")
+	if c.Queue.Adapter != "none" {
+		return fmt.Errorf("unsupported MEMORY_QUEUE_ADAPTER/MQ_ADAPTER %q: only %q is supported", c.Queue.Adapter, "none")
 	}
 	if c.Environment == "production" && !c.Auth.SessionCookieSecure {
 		return errors.New("secure auth cookies are required in production")
@@ -337,7 +330,6 @@ func EnvNames() map[string][]string {
 		"http_addr":                 envNames("MEMORY_HTTP_ADDR", "HTTP_ADDR"),
 		"http_request_timeout":      envNames("MEMORY_HTTP_REQUEST_TIMEOUT", "HTTP_REQUEST_TIMEOUT"),
 		"database_url":              envNames("MEMORY_DATABASE_URL", "DATABASE_URL"),
-		"redis_url":                 envNames("MEMORY_REDIS_URL"),
 		"migrate_on_start":          envNames("MEMORY_MIGRATE_ON_START"),
 		"auth_session_ttl":          envNames("MEMORY_AUTH_SESSION_TTL", "AUTH_SESSION_TTL"),
 		"auth_cookie_secure":        envNames("MEMORY_AUTH_COOKIE_SECURE", "AUTH_COOKIE_SECURE"),
@@ -364,7 +356,6 @@ func EnvNames() map[string][]string {
 		"reranker_model":            envNames("MEMORY_RERANKER_MODEL", "RERANKER_MODEL"),
 		"reranker_api_key":          envNames("MEMORY_RERANKER_API_KEY", "RERANKER_API_KEY"),
 		"queue_adapter":             envNames("MEMORY_QUEUE_ADAPTER", "MQ_ADAPTER"),
-		"queue_url":                 envNames("MEMORY_NATS_URL", "MQ_URL"),
 		"max_request_bytes":         envNames("MEMORY_MAX_REQUEST_BYTES", "MAX_REQUEST_BYTES"),
 		"external_llm_analysis":     envNames("MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS", "ALLOW_EXTERNAL_LLM_ANALYSIS"),
 	}

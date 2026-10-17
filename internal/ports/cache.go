@@ -19,6 +19,13 @@ type TenantCache interface {
 	Delete(ctx context.Context, tenantID, key string) error
 }
 
+// ExpiredCachePurger removes expired cache entries. It is a maintenance
+// concern kept separate from the read/write TenantCache contract, so only the
+// maintenance job depends on it.
+type ExpiredCachePurger interface {
+	PurgeExpired(ctx context.Context, tenantID string, limit int) (int, error)
+}
+
 // TenantCacheKey builds a physical cache key that always embeds the tenant id.
 // An empty tenant is rejected rather than defaulting to a shared namespace.
 func TenantCacheKey(tenantID, namespace, key string) (string, error) {

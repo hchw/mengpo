@@ -72,15 +72,15 @@ func TestCacheKeysEmbedTenantIdentity(t *testing.T) {
 	}
 }
 
-// 4.5 — Task queue jobs require tenant identity; an unbound job notification is
-// rejected at publish time.
+// 4.5 — Task queue jobs require tenant identity end to end.
 func TestQueueJobsRequireTenantIdentity(t *testing.T) {
 	notification := ports.JobNotification{JobID: "job-1"}
 	if notification.TenantID != "" {
 		t.Fatal("expected empty tenant")
 	}
-	// The outbox job carries tenant identity as a first-class field; the NATS
-	// publisher (see internal/adapters/nats) rejects notifications without it.
+	// The outbox job carries tenant identity as a first-class field; the
+	// database-backed store routes every read and write through the tenant
+	// schema, so an unbound job can never be claimed.
 	job := ports.OutboxJob{TenantID: "tenant-a", ID: "job-1", JobType: "normalize_event"}
 	if job.TenantID == "" {
 		t.Fatal("outbox job lost tenant identity")

@@ -11,9 +11,7 @@ import (
 
 	"github.com/hchw/mengpo/internal/adapters/embedding"
 	"github.com/hchw/mengpo/internal/adapters/llm"
-	"github.com/hchw/mengpo/internal/adapters/nats"
 	"github.com/hchw/mengpo/internal/adapters/postgres"
-	"github.com/hchw/mengpo/internal/adapters/redis"
 	"github.com/hchw/mengpo/internal/adapters/scheduler"
 	"github.com/hchw/mengpo/internal/application/analysis"
 	embeddingapp "github.com/hchw/mengpo/internal/application/embedding"
@@ -26,11 +24,7 @@ import (
 	"github.com/hchw/mengpo/internal/platform/tenantdb"
 	"github.com/hchw/mengpo/internal/ports"
 	"github.com/hchw/mengpo/internal/workers"
-	natsgo "github.com/nats-io/nats.go"
 )
-
-// NotificationSubject is the NATS subject used for best-effort worker wake-ups.
-const NotificationSubject = "memory.jobs"
 
 // TenantSource returns the tenants a worker should poll. It is refreshed so
 // provisioning and suspension are picked up without a restart.
@@ -99,18 +93,6 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		WorkerID: workerIdentity(),
 		Logger:   observability.NewLogger(os.Stderr),
 	}
-	if cfg.Queue.Adapter == "nats-core" && cfg.Queue.URL != "" {
-		connection, err := natsgo.Connect(cfg.Queue.URL, natsgo.Name("memory-worker"))
-		if err != nil {
-			return nil, fmt.Errorf("connect nats: %w", err)
-		}
-		adapter, err := nats.New(connection, NotificationSubject)
-		if err != nil {
-			connection.Close()
-			return nil, err
-		}
-		options.Notifier = adapter
-	}
 	if embedder != nil {
 		embeddings := postgres.NewEmbeddingRepository(router)
 		options.Embedding = embeddingapp.NewWorker(embeddings, embeddings, embedder, 0, 0)
@@ -156,11 +138,10 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		Handle:       options.Handle,
 	}
 	options.Runner = runner
-	if cfg.RedisURL != "" {
-		if cache, err := redis.NewCacheFromURL(cfg.RedisURL); err == nil {
-			dispatcher.Cache = cache
-		}
-	}
+	// The consolidate cache is database-backed: no external key/value store is
+	// required, and it is always available alongside the durable job store.
+	cache := postgres.NewTenantCache(router)
+	dispatcher.Cache = cache
 	if cfg.Scheduler.Adapter == "internal" {
 		schedulerComponent := scheduler.New(scheduler.Options{
 			Tenants:   store,
@@ -257,6 +238,10 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		}
 		evaluate := &maintenance.EvaluationJob{PlanName: "evaluation", Reader: memoryRepository, Runs: runsRepository}
 		if err := schedulerComponent.Register(evaluate, ports.Schedule{Name: evaluate.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
+		cacheCleanup := &maintenance.CacheCleanupJob{PlanName: "cache-cleanup", Cache: cache, BatchSize: cfg.Analysis.MaintenanceBatchSize}
+		if err := schedulerComponent.Register(cacheCleanup, ports.Schedule{Name: cacheCleanup.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
 			return nil, err
 		}
 		options.Scheduler = schedulerComponent

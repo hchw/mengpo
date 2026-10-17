@@ -9,9 +9,9 @@ and `make test-web`.
 
 | Requirement | Implementation | Verification |
 | --- | --- | --- |
-| Cache keys carry tenant identity | `internal/ports/cache.go`, `internal/application/projection/persistence.go` | `internal/verification/tenant_identity_test.go`, `internal/adapters/redis/cache_test.go` |
-| Redis cache isolates tenants | `internal/adapters/redis/cache.go` | `cache_test.go` (`TestRedisCacheIsolatesTenantsForSameLogicalKey`) |
-| Task queue / NATS notifications carry tenant | `internal/adapters/nats/pubsub.go` | `pubsub_test.go` (`TestNotificationsKeepTenantsSeparateAndDropUnboundPayloads`) |
+| Cache keys carry tenant identity | `internal/ports/cache.go`, `internal/application/projection/persistence.go` | `internal/verification/tenant_identity_test.go`, `internal/adapters/postgres/cache_test.go` |
+| Database-backed cache isolates tenants | `internal/adapters/postgres/cache.go` | `internal/adapters/postgres/cache_test.go` (`TestTenantCacheIsolatesTenantsForSameLogicalKey`) |
+| Task queue jobs carry tenant | `internal/ports/jobs.go` | `internal/verification` (`TestQueueJobsRequireTenantIdentity`) |
 | Embedding jobs carry tenant | `internal/application/embedding/worker.go` | `internal/verification` (`TestEmbeddingWorkerRequiresTenantIdentity`) |
 | Memory LLM batches carry tenant | `internal/application/analysis/service.go` | `internal/verification` (`TestAnalysisBatchCarriesTenantIdentity`) |
 | Metrics labeled per tenant | `internal/observability/tenant.go`, `http.go` | `internal/observability/tenant_metrics_test.go` |
@@ -40,7 +40,7 @@ and `make test-web`.
 | Requirement | Implementation | Verification |
 | --- | --- | --- |
 | Atomic raw-event + outbox write, lease recovery | `internal/adapters/postgres/observation.go`, `outbox.go` | `outbox_integration_test.go` |
-| NATS wake-up is not a durability boundary | `internal/adapters/nats/pubsub.go` | `pubsub_test.go` |
+| Job discovery is PostgreSQL polling, not a broker durability boundary | `internal/workers/outbox.go` | `internal/assembly/worker_test.go` |
 | Attribution levels | `internal/domain/observation/attribution.go` | `attribution_test.go` |
 | Full evidence chain Observe→Normalize→Project→Failure→Feedback | `internal/application/analysis/pipeline.go` | `internal/adapters/postgres/end_to_end_test.go` |
 
@@ -101,7 +101,8 @@ and `make test-web`.
 | Canonical `MEMORY_` env names across config/compose/docs | `internal/config/config.go`, `.env.example`, `deploy/dev/docker-compose.yml`, `docs/operations.md` | `internal/config/env_naming_test.go` |
 | Server wired to PostgreSQL, Tenant Router, repositories and `agentaccess.Service` | `internal/assembly/server.go` | `internal/assembly/server_integration_test.go` (`TestHTTPCommandEndpoints`) |
 | Consolidation enqueued as a durable job | `internal/adapters/postgres/outbox.go` (`EnqueueJob`) | `TestHTTPCommandEndpoints` |
-| Worker wired to outbox runner, Pub/Sub and embedding loop with graceful shutdown | `internal/assembly/worker.go` | `internal/assembly/worker_test.go` |
+| Worker wired to outbox runner, database cache and embedding loop with graceful shutdown | `internal/assembly/worker.go` | `internal/assembly/worker_test.go` |
+| Consolidate cache is database-backed and tenant-scoped | `internal/adapters/postgres/cache.go` | `internal/adapters/postgres/cache_test.go` |
 | Platform migrations run on startup, idempotently | `internal/assembly/db.go`, `internal/platform/registry` | `TestMigrateIsIdempotent` |
 
 ## Scope decisions
