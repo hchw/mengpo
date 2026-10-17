@@ -373,6 +373,61 @@ func TestSessionCompactionExtractionProducesActiveWorkingMemory(t *testing.T) {
 	}
 }
 
+func TestSessionBoundarySummarySurvivesModelCandidates(t *testing.T) {
+	event := observation.Event{
+		ID:          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		TenantID:    "tenant-a",
+		SessionID:   "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+		SourceType:  observation.SourceWorkflow,
+		MessageType: "context.compaction",
+		Payload:     json.RawMessage(`{"context_summary":true,"summary":"the build needs GOPROXY"}`),
+		OccurredAt:  time.Now().UTC(),
+	}
+	// The model answers with its own (arbitrary) candidate. Before this change
+	// that candidate suppressed the deterministic session summary entirely.
+	analyst := &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
+		CandidateID:      "compact-model-1",
+		EvidenceEventIDs: []string{event.ID},
+		ScopeType:        "session",
+		ScopeID:          event.SessionID,
+		Content:          json.RawMessage(`{"type":"project_overview","name":"log-trace-mcp"}`),
+		Confidence:       0.6,
+	}}}}
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, event, analyst, candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{
+		ID: "job-boundary-survives", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID,
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	working := dispatcher.WorkingMemory.(*fakeWorkingMemoryWriter)
+	if len(working.records) != 2 {
+		t.Fatalf("working memory = %d, want model candidate + boundary summary", len(working.records))
+	}
+	var summary *ports.WorkingMemoryRecord
+	for index := range working.records {
+		if working.records[index].Node.MemoryType == ports.MemoryTypeSessionSummary {
+			summary = &working.records[index]
+		}
+	}
+	if summary == nil {
+		t.Fatal("model candidate swallowed the session boundary summary")
+	}
+	if !strings.Contains(summary.Node.ContentText, "GOPROXY") {
+		t.Fatalf("boundary summary content text = %q", summary.Node.ContentText)
+	}
+	// The model's structured candidate must also carry a rendered projection so
+	// it is never a retrievable-but-empty ghost.
+	modelRecord := working.records[0]
+	if modelRecord.Node.MemoryType == ports.MemoryTypeSessionSummary {
+		modelRecord = working.records[1]
+	}
+	if modelRecord.Node.ContentText == "" {
+		t.Fatal("structured model candidate rendered an empty projection")
+	}
+}
+
 func TestCandidateStatusSeparatesWorkingAndBackgroundMemory(t *testing.T) {
 	if status, retrievable := candidateStatus("session"); status != "active" || !retrievable {
 		t.Fatalf("session scope = (%q, %v), want (active, true)", status, retrievable)

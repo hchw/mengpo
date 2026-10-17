@@ -504,6 +504,69 @@ func (r *MemoryRepository) ListRecentCandidates(ctx context.Context, tenantID st
 	return result, nil
 }
 
+// ListMissingContentText returns nodes whose canonical text projection is
+// missing while their content is not. The projection is rendered in Go so the
+// single renderer stays the only source of truth; a SQL migration cannot call
+// it, so repair runs as a scheduled job.
+func (r *MemoryRepository) ListMissingContentText(ctx context.Context, tenantID string, limit int) ([]ports.MemoryNodeRecord, error) {
+	if tenantID == "" || limit <= 0 {
+		return nil, ErrInvalidMemory
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	result := make([]ports.MemoryNodeRecord, 0, limit)
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT `+memoryNodeColumns+` FROM memory_nodes
+			WHERE deleted_at IS NULL AND coalesce(content_text, '') = ''
+			  AND coalesce(content::text, '') NOT IN ('', '{}', 'null', '[]')
+			ORDER BY updated_at DESC, id
+			LIMIT $1`, limit)
+		if err != nil {
+			return fmt.Errorf("list missing content text: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			node, err := scanMemory(rows)
+			if err != nil {
+				return fmt.Errorf("scan missing content text node: %w", err)
+			}
+			result = append(result, node)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// RefreshContentText stores a rendered projection only while the node still has
+// no projection, so a concurrent writer is never overwritten.
+func (r *MemoryRepository) RefreshContentText(ctx context.Context, tenantID, memoryID, contentText string) (bool, error) {
+	if tenantID == "" || memoryID == "" || contentText == "" {
+		return false, ErrInvalidMemory
+	}
+	updated := false
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE memory_nodes SET content_text = $2
+			WHERE id = $1::uuid AND deleted_at IS NULL AND coalesce(content_text, '') = ''`, memoryID, contentText)
+		if err != nil {
+			return fmt.Errorf("refresh content text: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		updated = rows > 0
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return updated, nil
+}
+
 var (
 	_ ports.DueMemoryReader       = (*MemoryRepository)(nil)
 	_ ports.RecentCandidateReader = (*MemoryRepository)(nil)

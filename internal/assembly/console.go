@@ -33,6 +33,7 @@ type ConsoleAPI struct {
 	AgentRegistrar AgentRegistrar
 	Triage         ports.CandidateTriageReader
 	Metrics        ports.RetrievalMetricsReader
+	Detail         ports.MemoryDetailReader
 }
 
 // MemberLister lists tenant members.
@@ -420,9 +421,50 @@ func (c *ConsoleAPI) handleMemory(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "memory not found")
 		return
 	}
+	provenance := parseProvenance(node.Provenance)
 	item := itemFor(node)
+	item["created_at"] = node.CreatedAt.UTC().Format(time.RFC3339)
+	item["content_text"] = node.ContentText
+	item["content"] = node.Content
+	item["evidence"] = []memoryDetailEvent{}
 	item["provenance"] = node.Provenance
+	// The detail view shows the raw events behind the memory and, when the memory
+	// came from a curated run, a pointer back to that run. Both are best-effort:
+	// a memory with no evidence or no run still renders on its own fields.
+	if c.Detail != nil {
+		if events, err := c.Detail.LoadEventsByIDs(r.Context(), scoped.TenantID, provenance.Evidence, 50); err == nil {
+			item["evidence"] = memoryDetailEvents(events)
+		}
+		if runID, err := c.Detail.FindRunByMemoryID(r.Context(), scoped.TenantID, node.ID); err == nil && runID != "" {
+			item["run_id"] = runID
+		}
+	}
 	writeAPIData(w, http.StatusOK, item)
+}
+
+// memoryDetailEvent is one raw event preview shown under a memory.
+type memoryDetailEvent struct {
+	ID          string `json:"id"`
+	SourceType  string `json:"source_type"`
+	MessageType string `json:"message_type"`
+	SessionID   string `json:"session_id"`
+	OccurredAt  string `json:"occurred_at"`
+	Payload     string `json:"payload"`
+}
+
+func memoryDetailEvents(inputs []ports.AnalysisRunInput) []memoryDetailEvent {
+	events := make([]memoryDetailEvent, 0, len(inputs))
+	for _, input := range inputs {
+		events = append(events, memoryDetailEvent{
+			ID:          input.ID,
+			SourceType:  input.SourceType,
+			MessageType: input.MessageType,
+			SessionID:   input.SessionID,
+			OccurredAt:  input.OccurredAt.UTC().Format(time.RFC3339),
+			Payload:     input.Payload,
+		})
+	}
+	return events
 }
 
 func (c *ConsoleAPI) handleFailures(w http.ResponseWriter, r *http.Request) {
@@ -644,18 +686,13 @@ func itemFor(node ports.MemoryNodeRecord) map[string]any {
 }
 
 func summarize(content json.RawMessage, contentText string) string {
-	if len(content) > 0 {
-		var fields map[string]any
-		if json.Unmarshal(content, &fields) == nil {
-			for _, key := range []string{"summary", "abstract", "text"} {
-				if value, ok := fields[key].(string); ok && strings.TrimSpace(value) != "" {
-					return value
-				}
-			}
-		}
+	text := memory.RenderContentText(content)
+	if text == "" {
+		text = contentText
 	}
-	if len(contentText) > 200 {
-		return contentText[:200]
+	runes := []rune(text)
+	if len(runes) > 200 {
+		return string(runes[:200])
 	}
-	return contentText
+	return text
 }

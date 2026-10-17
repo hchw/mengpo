@@ -140,6 +140,18 @@ type AnalysisRunDetailReader interface {
 	GetAnalysisRunDetail(ctx context.Context, tenantID, runID string, limit int) (AnalysisRunDetail, bool, error)
 }
 
+// MemoryDetailReader backs the console's per-memory detail view: the raw events
+// that support a memory plus, when it came from a curated run, the run that
+// produced it so an operator can pivot from a memory back to the task.
+type MemoryDetailReader interface {
+	// LoadEventsByIDs returns server-truncated previews of the given raw events.
+	LoadEventsByIDs(ctx context.Context, tenantID string, ids []string, limit int) ([]AnalysisRunInput, error)
+	// FindRunByMemoryID returns the analysis run id that produced the memory, or
+	// "" when no run references it. The id is the run's primary key, which the
+	// run-detail endpoint accepts.
+	FindRunByMemoryID(ctx context.Context, tenantID, memoryID string) (string, error)
+}
+
 // MaintenanceCursorStore tracks how far periodic maintenance has processed a
 // tenant's normalized events, so a maintenance run is resumable and idempotent.
 type MaintenanceCursorStore interface {

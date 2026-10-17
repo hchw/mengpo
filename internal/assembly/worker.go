@@ -191,6 +191,15 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 			return nil, err
 		}
 		memoryRepository := postgres.NewMemoryRepository(router)
+		contentTextBackfill := &maintenance.ContentTextBackfillJob{
+			PlanName:   "content-text-backfill",
+			Store:      memoryRepository,
+			Embeddings: options.Embedding,
+			BatchSize:  cfg.Analysis.MaintenanceBatchSize,
+		}
+		if err := schedulerComponent.Register(contentTextBackfill, ports.Schedule{Name: contentTextBackfill.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+			return nil, err
+		}
 		dedupe := &maintenance.DedupeJob{PlanName: "dedupe", Reader: memoryRepository, Runs: runsRepository, BatchSize: cfg.Analysis.MaintenanceBatchSize}
 		if err := schedulerComponent.Register(dedupe, ports.Schedule{Name: dedupe.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
 			return nil, err

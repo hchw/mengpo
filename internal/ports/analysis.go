@@ -42,6 +42,10 @@ type FailureAssessment struct {
 	Confidence  float64  `json:"confidence"`
 }
 
+// MemoryTypeSessionSummary marks a session-boundary summary that the runtime
+// already distilled, as opposed to a model-inferred insight.
+const MemoryTypeSessionSummary = "session_summary"
+
 type CandidateMemory struct {
 	CandidateID      string          `json:"candidate_id"`
 	EvidenceEventIDs []string        `json:"evidence_event_ids"`
@@ -49,6 +53,10 @@ type CandidateMemory struct {
 	ScopeID          string          `json:"scope_id"`
 	Content          json.RawMessage `json:"content"`
 	Confidence       float64         `json:"confidence"`
+	// MemoryType distinguishes specially-classified candidates, such as a
+	// runtime session-boundary summary, from ordinary insights. It is optional
+	// and defaults to "insight".
+	MemoryType string `json:"memory_type,omitempty"`
 }
 
 type ConflictAssessment struct {

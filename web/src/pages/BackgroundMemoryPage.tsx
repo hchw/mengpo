@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ConsoleApi } from '../api/console';
 import type { MemoryRecord, MemoryStatus } from '../api/types';
+import { MemoryCard } from '../components/MemoryCard';
+import { Pagination } from '../components/Pagination';
 import { StateView } from '../components/states';
 import { useI18n } from '../i18n';
+import { MemoryDetailDialog } from './MemoryDetailDialog';
+
+const PAGE_SIZE = 20;
+const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface BackgroundMemoryPageProps {
   api: ConsoleApi;
   isStale?: (updatedAt: string, now: number) => boolean;
   now?: () => number;
 }
-
-const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 const FILTERS: Array<{ labelKey: string; value: 'all' | MemoryStatus }> = [
   { labelKey: 'background.filter.all', value: 'all' },
@@ -27,20 +31,24 @@ export function BackgroundMemoryPage({ api, now = () => Date.now() }: Background
   const [error, setError] = useState<unknown>();
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [filter, setFilter] = useState<'all' | MemoryStatus>('all');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [detailId, setDetailId] = useState<string>();
 
   const load = useCallback(() => {
     setStatus('loading');
     api
-      .listMemories(1, 50)
-      .then((page) => {
-        setMemories(page.items);
-        setStatus(page.items.length === 0 ? 'empty' : 'ready');
+      .listMemories(page, PAGE_SIZE)
+      .then((result) => {
+        setMemories(result.items);
+        setTotal(result.total);
+        setStatus(result.total === 0 ? 'empty' : 'ready');
       })
       .catch((cause: unknown) => {
         setError(cause);
         setStatus('error');
       });
-  }, [api]);
+  }, [api, page]);
 
   useEffect(() => {
     load();
@@ -50,7 +58,7 @@ export function BackgroundMemoryPage({ api, now = () => Date.now() }: Background
     return <StateView kind="loading" />;
   }
   if (status === 'error') {
-    return <StateView kind="error" error={error} />;
+    return <StateView kind="error" error={error} onRetry={load} />;
   }
   if (status === 'empty') {
     return <StateView kind="empty" description={t('background.empty')} />;
@@ -69,19 +77,22 @@ export function BackgroundMemoryPage({ api, now = () => Date.now() }: Background
       {visible.length === 0 ? (
         <p data-testid="filtered-empty">{t('background.noneWithStatus', { status: filter })}</p>
       ) : (
-        <ul data-testid="memory-list">
+        <ul data-testid="memory-list" className="memory-list">
           {visible.map((memory) => {
             const stale = now() - new Date(memory.updated_at).getTime() > STALE_AFTER_MS;
-            return (
-              <li key={memory.id} data-testid={`memory-${memory.id}`}>
-                <span>{memory.content_summary}</span>
-                <span data-testid={`memory-status-${memory.id}`}>{memory.status}</span>
-                {stale ? <span data-testid={`memory-stale-${memory.id}`}>{t('background.stale')}</span> : null}
-              </li>
-            );
+            return <MemoryCard key={memory.id} memory={memory} stale={stale} onOpen={setDetailId} />;
           })}
         </ul>
       )}
+      <Pagination
+        page={page}
+        pageSize={PAGE_SIZE}
+        total={total}
+        onPageChange={setPage}
+        testId="memory-pagination"
+        statusTestId="memory-pagination-status"
+      />
+      {detailId ? <MemoryDetailDialog api={api} memoryId={detailId} onClose={() => setDetailId(undefined)} /> : null}
     </section>
   );
 }

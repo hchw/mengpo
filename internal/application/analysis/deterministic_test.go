@@ -53,6 +53,9 @@ func TestDeterministicCandidateCapturesSessionBoundary(t *testing.T) {
 	if string(candidate.Content) != `{"summary":"the build needs GOPROXY"}` {
 		t.Fatalf("boundary content = %s", candidate.Content)
 	}
+	if candidate.MemoryType != ports.MemoryTypeSessionSummary {
+		t.Fatalf("boundary memory type = %q, want %q", candidate.MemoryType, ports.MemoryTypeSessionSummary)
+	}
 	if err := ValidateResult(ruleBatch(event), ports.AnalystResult{Candidates: []ports.CandidateMemory{candidate}}); err != nil {
 		t.Fatalf("ValidateResult() error = %v", err)
 	}
@@ -80,6 +83,7 @@ func TestDeterministicCandidateSkipsUnqualifiedEvents(t *testing.T) {
 		{name: "no session", event: ports.AnalysisEvent{EventID: "e1", MessageType: "user_remember", Payload: json.RawMessage(`{"remember":true,"text":"x"}`)}},
 		{name: "no text", event: ports.AnalysisEvent{EventID: "e2", SessionID: "s", MessageType: "user_remember", Payload: json.RawMessage(`{"remember":true}`)}},
 		{name: "ordinary", event: ports.AnalysisEvent{EventID: "e3", SessionID: "s", MessageType: "turn.outcome", Payload: json.RawMessage(`{"text":"just chatting"}`)}},
+		{name: "empty boundary summary", event: ports.AnalysisEvent{EventID: "e4", SessionID: "s", MessageType: "context.compaction", Payload: json.RawMessage(`{"context_summary":true,"summary":"   "}`)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

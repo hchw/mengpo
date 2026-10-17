@@ -138,6 +138,32 @@ func TestConsoleEndpoints(t *testing.T) {
 		t.Fatalf("candidates missing candidate: %s", resp.Data)
 	}
 
+	// Session-scoped memories: a structured node with no explicit text field
+	// must still render a non-empty summary on the console.
+	sessionID := "00000000-0000-4000-8000-0000000c0a10"
+	structuredID := "00000000-0000-4000-8000-0000000c0a11"
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status, title) VALUES ($1::uuid, $2::uuid, 'active', 'console-session')`, sessionID, userID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+INSERT INTO memory_nodes (id, idempotency_key, user_id, session_id, scope_type, scope_id, memory_type, status, visibility, confidence, content, content_text, default_retrieval, version, provenance)
+VALUES ($1::uuid, 'console-session-structured', $2::uuid, $3::uuid, 'session', $3::uuid, 'session_summary', 'active', 'private', 0.6, '{"name":"log-trace-mcp","type":"project_overview"}'::jsonb, '', true, 1, '{"evidence_event_ids":[]}'::jsonb)`, structuredID, userID, sessionID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionEnvelope, _ := json.Marshal(map[string]any{
+		"version": "v1", "request_id": "list-session-memories", "idempotency_key": "list-session-memories",
+		"principal": map[string]any{"type": "user", "id": userID},
+		"scope":     map[string]any{"tenant_id": tenant.ID, "user_id": userID, "type": "session", "session_id": sessionID},
+		"privacy":   map[string]any{"visibility": "private"},
+		"payload":   map[string]any{"page": 1, "page_size": 20},
+	})
+	if resp := consolePost(t, handler, "/api/v1/memories", token, string(sessionEnvelope)); !bytes.Contains(resp.Data, []byte("log-trace-mcp")) {
+		t.Fatalf("session memories must render structured content: %s", resp.Data)
+	}
+
 	// Governance actions.
 	consolePost(t, handler, "/api/v1/candidates/"+candidateID+"/reject", token, consoleEnvelope(tenant.ID, userID, "reject-candidate", map[string]any{}))
 	if node, err := memories.Get(ctx, tenant.ID, candidateID); err != nil || node.Status != "rejected" {
@@ -179,6 +205,42 @@ func TestConsoleEndpoints(t *testing.T) {
 		return tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_relations WHERE relation_type='supersedes'`).Scan(&replacements)
 	}); err != nil || replacements == 0 {
 		t.Fatalf("correction relation count=%d err=%v", replacements, err)
+	}
+
+	// Memory detail: the raw events behind a memory are loaded from its
+	// provenance evidence, and the producing run is linked back when present.
+	rawEventID := "00000000-0000-4000-8000-0000000c0a20"
+	detailID := "00000000-0000-4000-8000-0000000c0a21"
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO observed_events (id, idempotency_key, source_type, source_id, message_type, payload, occurred_at, retention_class)
+VALUES ($1::uuid, 'console-detail-event', 'tool', 'tool-1', 'tool.failure', '{"stderr":"boom"}'::jsonb, now(), 'standard')`, rawEventID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+INSERT INTO memory_nodes (id, idempotency_key, user_id, scope_type, scope_id, memory_type, status, visibility, confidence, content, content_text, default_retrieval, version, provenance)
+VALUES ($1::uuid, 'console-detail', $2::uuid, 'user-global', $2::uuid, 'insight', 'active', 'private', 0.7, '{"summary":"boom on retry"}'::jsonb, 'boom on retry', true, 1, $3::jsonb)`,
+			detailID, userID, `{"evidence":["`+rawEventID+`"]}`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	detailResp := consolePost(t, handler, "/api/v1/memories/"+detailID, token, consoleEnvelope(tenant.ID, userID, "get-memory-detail", map[string]any{}))
+	if !bytes.Contains(detailResp.Data, []byte("boom")) || !bytes.Contains(detailResp.Data, []byte(rawEventID)) {
+		t.Fatalf("memory detail missing evidence payload: %s", detailResp.Data)
+	}
+	// A run that lists the memory as an output is exposed as a pivot back to the task.
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+INSERT INTO analysis_jobs (id, correlation_id, task_type, status, produced_memory_ids)
+VALUES ('00000000-0000-4000-8000-0000000c0a22'::uuid, 'run-for-detail', 'analyze', 'succeeded', $1::jsonb)`, `["`+detailID+`"]`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runResp := consolePost(t, handler, "/api/v1/memories/"+detailID, token, consoleEnvelope(tenant.ID, userID, "get-memory-detail-run", map[string]any{}))
+	if !bytes.Contains(runResp.Data, []byte("00000000-0000-4000-8000-0000000c0a22")) {
+		t.Fatalf("memory detail missing producing run: %s", runResp.Data)
 	}
 
 	// Single memory read.

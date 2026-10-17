@@ -47,6 +47,7 @@ func DeterministicCandidate(event ports.AnalysisEvent) (ports.CandidateMemory, b
 			ScopeID:          event.SessionID,
 			Content:          encodedContent(map[string]string{"summary": text}),
 			Confidence:       0.6,
+			MemoryType:       ports.MemoryTypeSessionSummary,
 		}, true
 	}
 	return ports.CandidateMemory{}, false

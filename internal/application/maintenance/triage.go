@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/hchw/mengpo/internal/application/analysis"
+	"github.com/hchw/mengpo/internal/domain/memory"
 	"github.com/hchw/mengpo/internal/domain/observation"
 	"github.com/hchw/mengpo/internal/ports"
 )
@@ -286,16 +286,7 @@ func (j *TriageJob) persistAbstractions(ctx context.Context, tenantID, owner, ru
 }
 
 func triageContentText(content json.RawMessage) string {
-	var fields map[string]any
-	if json.Unmarshal(content, &fields) != nil {
-		return ""
-	}
-	for _, key := range []string{"text", "content", "summary", "message"} {
-		if value, ok := fields[key].(string); ok {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return memory.RenderContentText(content)
 }
 
 func (j *TriageJob) now() time.Time         { return clock(j.Clock) }

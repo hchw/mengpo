@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { DashboardPage } from './DashboardPage';
 import { SessionExplorerPage } from './SessionExplorerPage';
@@ -13,7 +13,7 @@ import { SettingsPage } from './SettingsPage';
 import { AnalysisRunsPage } from './AnalysisRunsPage';
 import { ApiClientError } from '../api/client';
 import { LanguageProvider } from '../i18n';
-import { agent, analysisRun, analysisRunDetail, candidate, evaluation, failure, fakeConsoleApi, member, memory, page, projection, provider, scheduleStatus, session } from '../test/fakes';
+import { agent, analysisRun, analysisRunDetail, candidate, evaluation, failure, fakeConsoleApi, member, memory, memoryDetail, page, projection, provider, scheduleStatus, session } from '../test/fakes';
 
 const user = userEvent.setup();
 
@@ -39,15 +39,24 @@ describe('DashboardPage', () => {
 });
 
 describe('SessionExplorerPage', () => {
-  it('lists sessions and loads scoped memories for the selection', async () => {
+  it('groups sessions by title and loads scoped memories for the selection', async () => {
     const api = fakeConsoleApi({
       listSessions: async () => page([session('s1'), session('s2')]),
       listMemories: async (_p, _s, sessionId) => page([memory(`m-${sessionId}`)]),
     });
     render(<SessionExplorerPage api={api} />);
-    await waitFor(() => expect(screen.getByTestId('session-list').children.length).toBe(2));
+    await waitFor(() => expect(screen.getByTestId('session-title-list').children.length).toBe(2));
+    // The first title is expanded, so only its session is listed.
+    await waitFor(() => expect(screen.getByTestId('session-list').children.length).toBe(1));
+    expect(screen.getByTestId('session-updated-s1').textContent).toContain('2024');
+    // The drawer only opens once a session is selected.
+    expect(screen.queryByTestId('session-memories')).not.toBeInTheDocument();
+    await user.click(screen.getByText('s1'));
     await waitFor(() => expect(screen.getByTestId('session-memories').textContent).toContain('m-s1'));
+    expect(screen.getByTestId('memory-updated-m-s1').textContent).toContain('2024');
     await user.click(screen.getByText('Session s2'));
+    await waitFor(() => expect(screen.getByTestId('session-list').children.length).toBe(1));
+    await user.click(screen.getByText('s2'));
     await waitFor(() => expect(screen.getByTestId('session-memories').textContent).toContain('m-s2'));
   });
 
@@ -59,11 +68,12 @@ describe('SessionExplorerPage', () => {
     });
     render(<SessionExplorerPage api={api} />);
     await waitFor(() => expect(screen.getByTestId('session-list').children.length).toBe(1));
-    expect(screen.getByTestId('pagination-status').textContent).toContain('Page 1 of 2');
-    await user.click(screen.getByRole('button', { name: 'Next' }));
-    await waitFor(() => expect(screen.getByTestId('pagination-status').textContent).toContain('Page 2 of 2'));
+    const pager = within(screen.getByTestId('session-pagination'));
+    expect(screen.getByTestId('session-pagination-status').textContent).toContain('Page 1 of 2');
+    await user.click(pager.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByTestId('session-pagination-status').textContent).toContain('Page 2 of 2'));
     expect(listSessions).toHaveBeenCalledWith(2, 20);
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(pager.getByRole('button', { name: 'Next' })).toBeDisabled();
   });
 });
 
@@ -73,10 +83,32 @@ describe('BackgroundMemoryPage', () => {
     const conflicted = memory('m-conflict', { status: 'conflicted' });
     render(<BackgroundMemoryPage api={fakeConsoleApi({ listMemories: async () => page([stale, conflicted]) })} now={() => new Date('2024-01-02T00:00:00Z').getTime()} />);
     await waitFor(() => expect(screen.getByTestId('memory-list').children.length).toBe(2));
+    expect(screen.getByTestId('memory-updated-m-conflict').textContent).toContain('2024');
     expect(screen.getByTestId('memory-stale-m-stale')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Conflicted' }));
     await waitFor(() => expect(screen.getByTestId('memory-list').children.length).toBe(1));
     expect(screen.queryByTestId('memory-m-stale')).not.toBeInTheDocument();
+  });
+
+  it('paginates the background list', async () => {
+    const listMemories = vi.fn(async (p = 1) => page([memory(`m${p}`)], { total: 40, page: p, page_size: 20 }));
+    render(<BackgroundMemoryPage api={fakeConsoleApi({ listMemories })} />);
+    await waitFor(() => expect(screen.getByTestId('memory-pagination-status').textContent).toContain('Page 1 of 2'));
+    await user.click(within(screen.getByTestId('memory-pagination')).getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByTestId('memory-pagination-status').textContent).toContain('Page 2 of 2'));
+    expect(listMemories).toHaveBeenCalledWith(2, 20);
+  });
+
+  it('opens the memory detail with its source events', async () => {
+    const api = fakeConsoleApi({
+      listMemories: async () => page([memory('m1')]),
+      getMemory: async (id) => memoryDetail(id, { evidence: [{ id: 'ev-1', source_type: 'tool', message_type: 'tool.failure', session_id: '', occurred_at: '2024-01-02T00:00:00Z', payload: '{"stderr":"boom"}' }] }),
+    });
+    render(<BackgroundMemoryPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('memory-m1')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'View detail' }));
+    await waitFor(() => expect(screen.getByTestId('memory-detail-evidence')).toBeInTheDocument());
+    expect(screen.getByTestId('memory-evidence-ev-1').textContent).toContain('boom');
   });
 });
 

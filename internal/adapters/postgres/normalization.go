@@ -127,7 +127,7 @@ WHERE ne.raw_event_id = ANY($1::uuid[])`, uuidArrayLiteral(rawEventIDs))
 			var item ports.PendingAnalysisEvent
 			var sequence sql.NullInt64
 			var payload []byte
-			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.SessionID, &item.OccurredAt, &payload, &sequence); err != nil {
+			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.SessionID, &item.OccurredAt, &payload, &sequence, &item.Attribution); err != nil {
 				return err
 			}
 			item.Payload = json.RawMessage(payload)

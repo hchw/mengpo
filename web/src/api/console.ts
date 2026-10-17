@@ -7,6 +7,7 @@ import type {
   EvaluationSnapshot,
   FailureRecord,
   Member,
+  MemoryDetail,
   MemoryRecord,
   Page,
   ProjectionDebug,
@@ -45,6 +46,10 @@ export class ConsoleApi {
 
   listMemories(page = 1, pageSize = 20, sessionId?: string): Promise<Page<MemoryRecord>> {
     return this.client.list<MemoryRecord>(ConsolePaths.memories, { principal: this.principal, scope: this.scope(sessionId) }, page, pageSize);
+  }
+
+  getMemory(memoryId: string, sessionId?: string): Promise<MemoryDetail> {
+    return this.client.request<MemoryDetail>(`${ConsolePaths.memories}/${memoryId}`, { principal: this.principal, scope: this.scope(sessionId) });
   }
 
   listCandidates(page = 1, pageSize = 20): Promise<Page<CandidateRecord>> {

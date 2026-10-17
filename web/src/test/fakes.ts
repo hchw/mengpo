@@ -7,6 +7,7 @@ import type {
   EvaluationSnapshot,
   FailureRecord,
   Member,
+  MemoryDetail,
   MemoryRecord,
   Page,
   ProjectionDebug,
@@ -38,6 +39,15 @@ export const memory = (id: string, overrides: Partial<MemoryRecord> = {}): Memor
   content_summary: `Memory ${id}`,
   confidence: 0.8,
   updated_at: '2024-01-02T00:00:00Z',
+  ...overrides,
+});
+
+export const memoryDetail = (id: string, overrides: Partial<MemoryDetail> = {}): MemoryDetail => ({
+  ...memory(id),
+  content_text: `Memory ${id} text`,
+  content: { summary: `Memory ${id}` },
+  created_at: '2024-01-01T00:00:00Z',
+  evidence: [],
   ...overrides,
 });
 
@@ -189,6 +199,7 @@ export function fakeConsoleApi(overrides: Partial<ConsoleApi> = {}): ConsoleApi 
   return {
     listSessions: vi.fn(async () => page([session('s1')])),
     listMemories: vi.fn(async () => page([memory('m1')])),
+    getMemory: vi.fn(async (id: string) => memoryDetail(id)),
     listCandidates: vi.fn(async () => page([candidate('c1')])),
     reviewCandidate: vi.fn(async (id: string) => candidate(id)),
     debugProjection: vi.fn(async () => projection()),

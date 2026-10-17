@@ -8,10 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/hchw/mengpo/internal/application/analysis"
+	"github.com/hchw/mengpo/internal/domain/memory"
 	"github.com/hchw/mengpo/internal/domain/observation"
 	"github.com/hchw/mengpo/internal/ports"
 )
@@ -132,6 +132,7 @@ func (d *JobDispatcher) normalizeEvent(ctx context.Context, job ports.OutboxJob)
 			return err
 		}
 		d.captureDeterministicCandidate(event, &analysisResult)
+		d.captureSessionBoundarySummary(event, &analysisResult)
 		d.finishRun(ctx, job.TenantID, runID, taskType, time.Since(started), runUpdateFromResult(analysisResult, time.Since(started)))
 	}
 	pipeline, err := analysis.BuildPipelineResult(job.TenantID, d.SchemaVersion, d.NormalizationVersion, []analysis.RawEvent{{
@@ -391,7 +392,7 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 			SessionID:        nodeSession,
 			ScopeType:        candidate.ScopeType,
 			ScopeID:          scopeID,
-			MemoryType:       "insight",
+			MemoryType:       candidateMemoryType(candidate),
 			Status:           status,
 			Visibility:       "private",
 			Confidence:       candidate.Confidence,
@@ -560,7 +561,7 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 			SessionID:        sessionID,
 			ScopeType:        candidate.ScopeType,
 			ScopeID:          scopeID,
-			MemoryType:       "insight",
+			MemoryType:       candidateMemoryType(candidate),
 			Status:           status,
 			Visibility:       "private",
 			Confidence:       candidate.Confidence,
@@ -612,6 +613,33 @@ func (d *JobDispatcher) captureDeterministicCandidate(event observation.Event, r
 	result.Candidates = append(result.Candidates, candidate)
 }
 
+// captureSessionBoundarySummary guarantees that a session boundary produces a
+// session summary even when the analyst returned its own candidates. Session
+// working memory must not depend on the model being available or cooperative,
+// so unlike captureDeterministicCandidate this runs regardless of model output
+// and only skips when the same summary candidate is already present.
+func (d *JobDispatcher) captureSessionBoundarySummary(event observation.Event, result *ports.AnalystResult) {
+	if !observation.IsSessionBoundary(event) {
+		return
+	}
+	candidate, ok := analysis.DeterministicCandidate(ports.AnalysisEvent{
+		EventID:     event.ID,
+		SessionID:   event.SessionID,
+		OccurredAt:  event.OccurredAt,
+		MessageType: event.MessageType,
+		Payload:     event.Payload,
+	})
+	if !ok {
+		return
+	}
+	for _, existing := range result.Candidates {
+		if existing.CandidateID == candidate.CandidateID {
+			return
+		}
+	}
+	result.Candidates = append(result.Candidates, candidate)
+}
+
 // candidateStatus decides the initial governance state for a model-proposed
 // memory. Session working memory is queried during the same session, so it is
 // active immediately; the candidate gate exists to protect the background tree,
@@ -624,14 +652,15 @@ func candidateStatus(scopeType string) (string, bool) {
 }
 
 func candidateContentText(content json.RawMessage) string {
-	var fields map[string]any
-	if json.Unmarshal(content, &fields) != nil {
-		return ""
+	return memory.RenderContentText(content)
+}
+
+// candidateMemoryType honors only the known session-summary classification;
+// every other candidate stays a generic insight so a model cannot invent
+// arbitrary memory types.
+func candidateMemoryType(candidate ports.CandidateMemory) string {
+	if candidate.MemoryType == ports.MemoryTypeSessionSummary {
+		return ports.MemoryTypeSessionSummary
 	}
-	for _, key := range []string{"text", "content", "summary", "message"} {
-		if value, ok := fields[key].(string); ok {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return "insight"
 }

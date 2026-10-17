@@ -345,6 +345,56 @@ func loadRunOutputs(ctx context.Context, tx *sql.Tx, ids []string, limit int) ([
 	return outputs, rows.Err()
 }
 
+// LoadEventsByIDs returns truncated previews of the given raw events. It backs
+// the console's per-memory detail so the events behind one memory can be shown
+// without loading a whole run.
+func (r *AnalystRunRepository) LoadEventsByIDs(ctx context.Context, tenantID string, ids []string, limit int) ([]ports.AnalysisRunInput, error) {
+	if tenantID == "" || len(ids) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var result []ports.AnalysisRunInput
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		inputs, err := loadRunInputs(ctx, tx, ids, limit)
+		if err != nil {
+			return err
+		}
+		result = inputs
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// FindRunByMemoryID returns the correlation id of the most recent run that
+// produced the memory, or "" when no run references it.
+func (r *AnalystRunRepository) FindRunByMemoryID(ctx context.Context, tenantID, memoryID string) (string, error) {
+	if tenantID == "" || memoryID == "" {
+		return "", nil
+	}
+	runID := ""
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `
+SELECT id::text
+FROM analysis_jobs
+WHERE produced_memory_ids @> $1::jsonb
+ORDER BY created_at DESC
+LIMIT 1`, outputIDsJSON([]string{memoryID})).Scan(&runID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return runID, nil
+}
+
 // LoadMaintenanceCursor returns the watermark for a tenant task, defaulting to 0.
 func (r *AnalystRunRepository) LoadMaintenanceCursor(ctx context.Context, tenantID, taskType string) (int64, error) {
 	var watermark int64
@@ -371,6 +421,8 @@ ON CONFLICT (task_type) DO UPDATE SET watermark = GREATEST(maintenance_cursors.w
 }
 
 var (
-	_ ports.AnalysisRunStore       = (*AnalystRunRepository)(nil)
-	_ ports.MaintenanceCursorStore = (*AnalystRunRepository)(nil)
+	_ ports.AnalysisRunStore        = (*AnalystRunRepository)(nil)
+	_ ports.AnalysisRunDetailReader = (*AnalystRunRepository)(nil)
+	_ ports.MemoryDetailReader      = (*AnalystRunRepository)(nil)
+	_ ports.MaintenanceCursorStore  = (*AnalystRunRepository)(nil)
 )

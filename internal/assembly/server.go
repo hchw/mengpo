@@ -190,6 +190,7 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 		AgentRegistrar: agents.NewService(agentRepo),
 		Triage:         postgres.NewTriageRepository(router),
 		Metrics:        postgres.NewProjectionRepository(router),
+		Detail:         postgres.NewAnalystRunRepository(router),
 	}
 	providerService, err := NewProviderService(cfg, router, newProviderAnalystBuilder(cfg))
 	if err != nil {

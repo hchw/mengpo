@@ -75,6 +75,29 @@ export interface MemoryRecord {
   updated_at: string;
 }
 
+// MemoryDetailEvent is one raw event that supports a memory, previewed and
+// truncated server-side.
+export interface MemoryDetailEvent {
+  id: string;
+  source_type: string;
+  message_type: string;
+  session_id: string;
+  occurred_at: string;
+  payload: string;
+}
+
+// MemoryDetail is a memory plus the content behind it: the structured payload,
+// the rendered text, and the raw events that support it. run_id, when present,
+// points at the curated task that produced the memory.
+export interface MemoryDetail extends MemoryRecord {
+  content_text: string;
+  content: unknown;
+  created_at: string;
+  evidence: MemoryDetailEvent[];
+  run_id?: string;
+  provenance?: unknown;
+}
+
 export interface CandidateRecord extends MemoryRecord {
   proposed_by: string;
   evidence_ids: string[];
