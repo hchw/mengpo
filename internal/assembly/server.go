@@ -94,7 +94,7 @@ func BuildUseCases(cfg config.Config, db *sql.DB) (httpapi.UseCases, error) {
 
 // NewHandler mounts the HTTP surface: health, metrics, console authentication
 // and the tenant-bound /api/v1 command endpoints.
-func NewHandler(cfg config.Config, useCases httpapi.UseCases, auth Authenticator, authAPI *AuthAPI, consoleAPI *ConsoleAPI, ops *ConsoleOps, readiness func(context.Context) error, logger *slog.Logger, metrics *observability.Metrics) http.Handler {
+func NewHandler(cfg config.Config, useCases httpapi.UseCases, auth Authenticator, authAPI *AuthAPI, consoleAPI *ConsoleAPI, ops *ConsoleOps, handshakeAPI *AgentHandshakeAPI, mcpHandler http.Handler, readiness func(context.Context) error, logger *slog.Logger, metrics *observability.Metrics) http.Handler {
 	if logger == nil {
 		logger = observability.NewLogger(os.Stderr)
 	}
@@ -113,6 +113,14 @@ func NewHandler(cfg config.Config, useCases httpapi.UseCases, auth Authenticator
 	}
 	if ops != nil {
 		ops.Register(mux)
+	}
+	if handshakeAPI != nil {
+		handshakeAPI.Register(mux)
+	}
+	if mcpHandler != nil {
+		// The MCP transport owns every path under its mount point.
+		mux.Handle("/mcp", mcpHandler)
+		mux.Handle("/mcp/", mcpHandler)
 	}
 	return metrics.Middleware(logger, authMiddleware(auth, mux))
 }
@@ -179,6 +187,7 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 	}
 	router := tenantdb.NewRouter(db, registry.NewStore(db))
 	memoryRepository := postgres.NewMemoryRepository(router)
+	agentService := agents.NewService(agentRepo)
 	consoleAPI := &ConsoleAPI{
 		Memories:       memoryRepository,
 		List:           memoryRepository,
@@ -187,7 +196,7 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 		Governance:     governance.NewService(memoryRepository),
 		Members:        identityRepo,
 		Agents:         agentRepo,
-		AgentRegistrar: agents.NewService(agentRepo),
+		AgentRegistrar: agentService,
 		Triage:         postgres.NewTriageRepository(router),
 		Metrics:        postgres.NewProjectionRepository(router),
 		Detail:         postgres.NewAnalystRunRepository(router),
@@ -212,7 +221,7 @@ func NewServer(cfg config.Config, db *sql.DB) (*Server, error) {
 		db:      db,
 		logger:  logger,
 		metrics: metrics,
-		handler: NewHandler(cfg, useCases, authenticator, authAPI, consoleAPI, ops, readiness, logger, metrics),
+		handler: NewHandler(cfg, useCases, authenticator, authAPI, consoleAPI, ops, &AgentHandshakeAPI{Service: agentService, Agents: agentRepo}, mcpHandlerFor(useCases, agentRepo), readiness, logger, metrics),
 	}, nil
 }
 

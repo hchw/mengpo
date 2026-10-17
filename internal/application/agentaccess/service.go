@@ -202,7 +202,7 @@ func (s *Service) Observe(ctx context.Context, envelope dto.Envelope) (any, erro
 		return nil, err
 	}
 	if !scoped.HasCapability("observe") {
-		return nil, fmt.Errorf("%w: observe capability not granted", ErrForbidden)
+		return nil, CapabilityDeniedError{Capability: "observe"}
 	}
 	if s.gateway == nil {
 		return nil, errors.New("observe handler is not configured")
@@ -292,6 +292,9 @@ func (s *Service) Session(ctx context.Context, envelope dto.Envelope) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	if !scoped.HasCapability("session") {
+		return nil, CapabilityDeniedError{Capability: "session"}
+	}
 	if s.sessions == nil {
 		return nil, errors.New("session handler is not configured")
 	}
@@ -328,7 +331,7 @@ func (s *Service) Project(ctx context.Context, envelope dto.Envelope) (any, erro
 		return nil, err
 	}
 	if !scoped.HasCapability("project") {
-		return nil, fmt.Errorf("%w: project capability not granted", ErrForbidden)
+		return nil, CapabilityDeniedError{Capability: "project"}
 	}
 	if s.projector == nil {
 		return nil, errors.New("project handler is not configured")
@@ -342,7 +345,7 @@ func (s *Service) Feedback(ctx context.Context, envelope dto.Envelope) (any, err
 		return nil, err
 	}
 	if !scoped.HasCapability("feedback") {
-		return nil, fmt.Errorf("%w: feedback capability not granted", ErrForbidden)
+		return nil, CapabilityDeniedError{Capability: "feedback"}
 	}
 	if s.feedback == nil {
 		return nil, errors.New("feedback handler is not configured")
@@ -354,6 +357,9 @@ func (s *Service) Consolidate(ctx context.Context, envelope dto.Envelope) (any, 
 	scoped, _, err := s.bind(ctx, envelope)
 	if err != nil {
 		return nil, err
+	}
+	if !scoped.HasCapability("consolidate") {
+		return nil, CapabilityDeniedError{Capability: "consolidate"}
 	}
 	if s.consolidator == nil {
 		return nil, errors.New("consolidate handler is not configured")

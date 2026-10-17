@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"slices"
@@ -29,6 +30,10 @@ type AgentAuthenticator struct {
 	Agents AgentCredentialLookup
 }
 
+// ErrUserSelectionRequired reports that an agent binds multiple users and the
+// caller did not declare which one it acts for.
+var ErrUserSelectionRequired = errors.New("agent binds multiple users; user_id is required")
+
 func (a AgentAuthenticator) Authenticate(r *http.Request) (agentaccess.Identity, error) {
 	if a.Agents == nil {
 		return agentaccess.Identity{}, agentaccess.ErrNoIdentity
@@ -40,18 +45,35 @@ func (a AgentAuthenticator) Authenticate(r *http.Request) (agentaccess.Identity,
 	// The envelope is only consulted for the optional bound user; a credential
 	// with a single allowed user resolves everything else from the agent.
 	peek, _ := peekEnvelope(r)
+	identity, err := resolveAgentCredential(r.Context(), a.Agents, secret, strings.TrimSpace(peek.Scope.UserID))
+	if err != nil {
+		return agentaccess.Identity{}, err
+	}
+	identity.SessionID = peek.Scope.SessionID
+	identity.ScopeType = peek.Scope.Type
+	return identity, nil
+}
+
+// resolveAgentCredential is the single "Bearer secret -> trusted identity" path,
+// shared by the request middleware and the capability-discovery endpoint. It
+// validates the credential, resolves the bound user (filling the sole allowed
+// user when none is supplied), and never trusts a declared user it cannot map
+// to the agent.
+func resolveAgentCredential(ctx context.Context, lookup AgentCredentialLookup, secret, userID string) (agentaccess.Identity, error) {
+	if lookup == nil || secret == "" {
+		return agentaccess.Identity{}, agentaccess.ErrNoIdentity
+	}
 	digest := sha256.Sum256([]byte(secret))
-	agent, credential, err := a.Agents.FindByCredentialHash(r.Context(), digest[:])
+	agent, credential, err := lookup.FindByCredentialHash(ctx, digest[:])
 	if err != nil || agent.Status != auth.AgentActive || credential.RevokedAt != nil ||
 		(!credential.ExpiresAt.IsZero() && !credential.ExpiresAt.After(time.Now())) {
 		return agentaccess.Identity{}, agentaccess.ErrNoIdentity
 	}
-	userID := strings.TrimSpace(peek.Scope.UserID)
 	if userID == "" {
 		if len(agent.AllowedUserIDs) != 1 {
 			// Zero users means the agent is unusable; more than one is ambiguous
 			// and the caller must declare which bound user it acts for.
-			return agentaccess.Identity{}, agentaccess.ErrNoIdentity
+			return agentaccess.Identity{}, ErrUserSelectionRequired
 		}
 		userID = agent.AllowedUserIDs[0]
 	}
@@ -63,8 +85,6 @@ func (a AgentAuthenticator) Authenticate(r *http.Request) (agentaccess.Identity,
 		UserID:       userID,
 		AgentID:      agent.ID,
 		SourceID:     agent.ID,
-		SessionID:    peek.Scope.SessionID,
-		ScopeType:    peek.Scope.Type,
 		Capabilities: agent.Capabilities,
 		Source:       agentaccess.SourceAgentContext,
 		AccessLevel:  observation.Level1,

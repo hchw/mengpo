@@ -40,7 +40,7 @@ func ResolveDeployment(config DeploymentConfig, request RequestContext) (Identit
 	}
 	capabilities := append([]string(nil), config.Capabilities...)
 	if len(capabilities) == 0 {
-		capabilities = []string{"observe", "project", "feedback"}
+		capabilities = []string{"observe", "project", "feedback", "session", "consolidate"}
 	}
 	return Identity{
 		TenantID:     config.TenantID,

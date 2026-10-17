@@ -125,12 +125,25 @@ type CodedError interface {
 	Retryable() bool
 }
 
+// statusCoder optionally lets a CodedError override the default HTTP status.
+// It exists so application-layer errors can request a specific status (for
+// example 403 for a capability denial) without the transport importing them.
+type statusCoder interface {
+	HTTPStatusCode() int
+}
+
 func mapError(err error) (int, *Error) {
 	var coded CodedError
 	if errors.As(err, &coded) {
 		status := http.StatusBadRequest
 		if coded.Retryable() {
 			status = http.StatusServiceUnavailable
+		}
+		var sc statusCoder
+		if errors.As(err, &sc) {
+			if override := sc.HTTPStatusCode(); override != 0 {
+				status = override
+			}
 		}
 		return status, &Error{Code: coded.APIErrorCode(), Message: safeMessage(err), Retryable: coded.Retryable()}
 	}

@@ -209,6 +209,20 @@ func TestDisableAgentBlocksHandshakeAndRotation(t *testing.T) {
 	}
 }
 
+func TestSupportedCapabilitiesIncludeSessionAndConsolidate(t *testing.T) {
+	for _, capability := range []string{"observe", "project", "feedback", "session", "consolidate"} {
+		if !validCapabilities([]string{capability}) {
+			t.Fatalf("capability %q rejected", capability)
+		}
+	}
+	if validCapabilities([]string{"observe", "unknown"}) {
+		t.Fatal("unknown capability accepted")
+	}
+	if validCapabilities(nil) {
+		t.Fatal("empty capabilities accepted")
+	}
+}
+
 func TestRotatedCredentialReplacesExpiredVerifier(t *testing.T) {
 	repository := newMemoryRepository()
 	service := NewService(repository)

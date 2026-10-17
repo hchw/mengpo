@@ -26,6 +26,11 @@ func TestLevel0DeploymentCredentialResolvesTenantAndIngests(t *testing.T) {
 	if identity.TenantID != "tenant-deploy" || identity.Source != SourceDeployment || identity.AccessLevel != obsdomain.Level0 {
 		t.Fatalf("identity=%#v", identity)
 	}
+	for _, capability := range []string{"observe", "project", "feedback", "session", "consolidate"} {
+		if !contains(identity.Capabilities, capability) {
+			t.Fatalf("deployment default missing capability %q: %#v", capability, identity.Capabilities)
+		}
+	}
 	principal := PrincipalFor(identity, Scoped{TenantID: identity.TenantID, UserID: identity.UserID})
 	if !principal.DeploymentBound || principal.AccessLevel != obsdomain.Level0 || principal.TenantID != "tenant-deploy" {
 		t.Fatalf("principal=%#v", principal)

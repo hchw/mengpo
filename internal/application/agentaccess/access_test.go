@@ -26,7 +26,7 @@ func envelope(scope dto.Scope, principal dto.Principal, payload string) dto.Enve
 }
 
 func agentIdentity() Identity {
-	return Identity{TenantID: "tenant-a", UserID: "user-a", AgentID: "agent-a", SessionID: "session-a", ScopeType: "session", Capabilities: []string{"observe", "project", "feedback"}, Source: SourceAgentContext, AccessLevel: obsdomain.Level1}
+	return Identity{TenantID: "tenant-a", UserID: "user-a", AgentID: "agent-a", SessionID: "session-a", ScopeType: "session", Capabilities: []string{"observe", "project", "feedback", "session", "consolidate"}, Source: SourceAgentContext, AccessLevel: obsdomain.Level1}
 }
 
 func TestBinderAcceptsMatchingTenantAndRejectsCrossTenant(t *testing.T) {
@@ -182,8 +182,9 @@ func TestObserveRejectsMissingCapability(t *testing.T) {
 	identity := agentIdentity()
 	identity.Capabilities = []string{"project"}
 	ctx := WithIdentity(context.Background(), identity)
-	if _, err := service.Observe(ctx, envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{"text":"x"}`)); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("err=%v want forbidden", err)
+	var denied CapabilityDeniedError
+	if _, err := service.Observe(ctx, envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{"text":"x"}`)); !errors.As(err, &denied) || denied.Capability != "observe" {
+		t.Fatalf("err=%v want capability denied for observe", err)
 	}
 }
 
@@ -201,6 +202,68 @@ func TestSessionBindsExternalIdentityIdempotently(t *testing.T) {
 	}
 	if binder.binding.TenantID != "tenant-a" || binder.binding.UserID != "user-a" || binder.binding.AgentID != "agent-a" || binder.binding.ExternalID != "ext-1" {
 		t.Fatalf("binding=%#v", binder.binding)
+	}
+}
+
+func TestSessionRejectsMissingCapability(t *testing.T) {
+	binder := &fakeBinder{result: "session-a"}
+	service := NewService(ServiceOptions{Sessions: binder})
+	identity := agentIdentity()
+	identity.Capabilities = []string{"observe", "project", "feedback"}
+	ctx := WithIdentity(context.Background(), identity)
+	var denied CapabilityDeniedError
+	_, err := service.Session(ctx, envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{}`))
+	if !errors.As(err, &denied) || denied.Capability != "session" {
+		t.Fatalf("err=%v want capability denied for session", err)
+	}
+	if binder.binding.SessionID != "" {
+		t.Fatalf("binding must not happen: %#v", binder.binding)
+	}
+}
+
+type recordingConsolidator struct{ scoped Scoped }
+
+func (c *recordingConsolidator) Consolidate(_ context.Context, scoped Scoped, _ dto.Envelope) (any, error) {
+	c.scoped = scoped
+	return map[string]string{"ok": "consolidate"}, nil
+}
+
+func TestConsolidateRejectsMissingCapability(t *testing.T) {
+	consolidator := &recordingConsolidator{}
+	service := NewService(ServiceOptions{Consolidator: consolidator})
+	identity := agentIdentity()
+	identity.Capabilities = []string{"observe", "project", "feedback"}
+	ctx := WithIdentity(context.Background(), identity)
+	var denied CapabilityDeniedError
+	_, err := service.Consolidate(ctx, envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{}`))
+	if !errors.As(err, &denied) || denied.Capability != "consolidate" {
+		t.Fatalf("err=%v want capability denied for consolidate", err)
+	}
+	if consolidator.scoped.TenantID != "" {
+		t.Fatalf("consolidate must not run: %#v", consolidator.scoped)
+	}
+}
+
+func TestBackfilledLegacyCapabilitiesPassGates(t *testing.T) {
+	// The platform migration grants session to observe-holders, so a legacy
+	// observe-only credential ends up with {observe, session} and must bind.
+	observer := agentIdentity()
+	observer.Capabilities = []string{"observe", "session"}
+	sessionService := NewService(ServiceOptions{Sessions: &fakeBinder{result: "session-a"}})
+	if _, err := sessionService.Session(WithIdentity(context.Background(), observer), envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{}`)); err != nil {
+		t.Fatalf("backfilled observer session: %v", err)
+	}
+
+	// The migration grants consolidate to project-holders.
+	projector := agentIdentity()
+	projector.Capabilities = []string{"project", "consolidate"}
+	consolidator := &recordingConsolidator{}
+	consolidateService := NewService(ServiceOptions{Consolidator: consolidator})
+	if _, err := consolidateService.Consolidate(WithIdentity(context.Background(), projector), envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "session", SessionID: "session-a"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{}`)); err != nil {
+		t.Fatalf("backfilled projector consolidate: %v", err)
+	}
+	if consolidator.scoped.TenantID != "tenant-a" {
+		t.Fatalf("consolidate did not run: %#v", consolidator.scoped)
 	}
 }
 

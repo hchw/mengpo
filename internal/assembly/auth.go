@@ -217,7 +217,7 @@ func (a SessionAuthenticator) Authenticate(r *http.Request) (agentaccess.Identit
 		TenantID:     session.TenantID,
 		UserID:       user.ID,
 		SourceID:     user.ID,
-		Capabilities: []string{"observe", "project", "feedback"},
+		Capabilities: []string{"observe", "project", "feedback", "session", "consolidate"},
 		Roles:        roles,
 		Source:       agentaccess.SourceVerifiedUser,
 	}, nil

@@ -12,7 +12,7 @@ export interface MembersPageProps {
 }
 
 const AGENT_SCOPES: ScopeType[] = ['user-global', 'session'];
-const AGENT_CAPABILITIES = ['observe', 'project', 'feedback'] as const;
+const AGENT_CAPABILITIES = ['observe', 'project', 'feedback', 'session', 'consolidate'] as const;
 
 // MembersPage manages members, roles and agents. Every mutating action is gated
 // by the caller's tenant role, so a plain member sees a permission state rather

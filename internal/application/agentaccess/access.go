@@ -57,6 +57,28 @@ var (
 	ErrNoIdentity  = errors.New("no trusted identity on context")
 )
 
+// CapabilityDeniedError reports that the resolved identity lacks the capability
+// an operation requires. It is permanent: retrying cannot succeed until an
+// administrator grants the capability, so callers MUST NOT treat it as a
+// transient service failure.
+type CapabilityDeniedError struct {
+	Capability string
+}
+
+func (e CapabilityDeniedError) Error() string {
+	return fmt.Sprintf("capability %q is not granted", e.Capability)
+}
+
+// APIErrorCode is the stable, transport-independent permission error code.
+func (CapabilityDeniedError) APIErrorCode() string { return "CAPABILITY_DENIED" }
+
+// Retryable is false: a missing capability never resolves on retry.
+func (CapabilityDeniedError) Retryable() bool { return false }
+
+// HTTPStatusCode maps the denial to 403 at the HTTP boundary without letting
+// the transport package import application types.
+func (CapabilityDeniedError) HTTPStatusCode() int { return 403 }
+
 // Resolver turns a credential or handshake result into a trusted Identity.
 // Level 0 deployments resolve tenant from the deployment credential; Level 1/2
 // resolve it from the Agent handshake context.

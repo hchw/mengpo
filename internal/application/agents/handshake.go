@@ -28,7 +28,7 @@ var (
 	ErrUnsupportedProtocol = errors.New("unsupported agent protocol")
 )
 
-var supportedCapabilities = []string{"observe", "project", "feedback"}
+var supportedCapabilities = []string{"observe", "project", "feedback", "session", "consolidate"}
 
 // Repository operations that update credentials must be atomic: rotating a
 // credential revokes the previous verifier and stores the new verifier together.

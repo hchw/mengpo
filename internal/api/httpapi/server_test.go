@@ -55,6 +55,15 @@ func (permanentError) Error() string        { return "invalid operation" }
 func (permanentError) APIErrorCode() string { return "INVALID_OPERATION" }
 func (permanentError) Retryable() bool      { return false }
 
+// capabilityDeniedError mirrors the application-layer capability error so the
+// transport mapping can be tested without importing application packages.
+type capabilityDeniedError struct{}
+
+func (capabilityDeniedError) Error() string        { return "capability \"session\" is not granted" }
+func (capabilityDeniedError) APIErrorCode() string { return "CAPABILITY_DENIED" }
+func (capabilityDeniedError) Retryable() bool      { return false }
+func (capabilityDeniedError) HTTPStatusCode() int  { return http.StatusForbidden }
+
 func requestEnvelope() []byte {
 	body, _ := json.Marshal(dto.Envelope{
 		Version: dto.CurrentVersion, RequestID: "req-1", IdempotencyKey: "idem-1",
@@ -151,6 +160,7 @@ func TestHTTPMapsTypedRetryableErrorsAndDeadlines(t *testing.T) {
 		{"invalid envelope", dto.ErrInvalidEnvelope, http.StatusBadRequest, "INVALID_ENVELOPE", false},
 		{"wrapped invalid envelope", fmt.Errorf("%w: unsupported feedback type %%q", dto.ErrInvalidEnvelope), http.StatusBadRequest, "INVALID_ENVELOPE", false},
 		{"invalid principal", observation.ErrInvalidPrincipal, http.StatusBadRequest, "INVALID_PRINCIPAL", false},
+		{"capability denied", capabilityDeniedError{}, http.StatusForbidden, "CAPABILITY_DENIED", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
