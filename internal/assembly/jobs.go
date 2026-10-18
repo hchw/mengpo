@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hchw/mengpo/internal/application/analysis"
@@ -64,6 +65,18 @@ type JobDispatcher struct {
 	NewID                func() (string, error)
 	// AnalysisTask is the rule pre-screen. It defaults to observation.AnalysisTask.
 	AnalysisTask func(observation.Event) (string, bool)
+	// ExplicitRememberAutoActivate makes an explicit user "remember" take effect
+	// immediately by activating the freshly written candidate through governance.
+	ExplicitRememberAutoActivate bool
+	// Governance activates explicit-remember candidates when auto-activation is
+	// enabled. A nil applier leaves them as review candidates.
+	Governance governanceActivator
+}
+
+// governanceActivator promotes a freshly written memory through the governance
+// service so the transition is audited and version-checked like any other.
+type governanceActivator interface {
+	Apply(ctx context.Context, tenantID, memoryID string, command memory.GovernanceCommand) (memory.GovernanceMutation, error)
 }
 
 // Handle implements workers.JobHandler.
@@ -326,15 +339,18 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 	}
 	sessionByRawID := make(map[string]string, len(events))
 	attributionByRawID := make(map[string]string, len(events))
+	explicitByRawID := make(map[string]bool, len(events))
 	for _, event := range events {
 		sessionByRawID[event.RawEventID] = event.SessionID
 		attributionByRawID[event.RawEventID] = event.Attribution
+		explicitByRawID[event.RawEventID] = isExplicitRemember("", event.Payload)
 	}
 	newID := d.NewID
 	if newID == nil {
 		newID = newUUID
 	}
 	records := make([]ports.CandidateMemoryRecord, 0, len(candidates))
+	toActivate := make([]ports.CandidateMemoryRecord, 0, len(candidates))
 	for _, candidate := range candidates {
 		if candidate.ScopeType != "session" && candidate.ScopeType != "user-global" {
 			continue
@@ -361,6 +377,7 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 		} else {
 			scopeID = owner
 		}
+		explicit := candidateExplicitRemember(candidate, explicitByRawID)
 		status, defaultRetrieval := candidateStatus(candidate.ScopeType)
 		id, err := newID()
 		if err != nil {
@@ -385,7 +402,7 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 			}
 			evidence = append(evidence, ports.MemoryEvidenceRecord{MemoryID: id, RawEventID: evidenceID, EvidenceRole: "supports", Confidence: candidate.Confidence, Attribution: attribution})
 		}
-		records = append(records, ports.CandidateMemoryRecord{Node: ports.MemoryNodeRecord{
+		record := ports.CandidateMemoryRecord{Node: ports.MemoryNodeRecord{
 			ID:               id,
 			IdempotencyKey:   "candidate:" + inputHash + ":" + candidate.CandidateID,
 			UserID:           owner,
@@ -400,12 +417,19 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 			ContentText:      candidateContentText(candidate.Content),
 			DefaultRetrieval: defaultRetrieval,
 			Provenance:       provenance,
-		}, Evidence: evidence})
+		}, Evidence: evidence}
+		records = append(records, record)
+		if explicit && record.Node.ScopeType == "user-global" {
+			toActivate = append(toActivate, record)
+		}
 	}
 	if len(records) == 0 {
 		return nil
 	}
-	return d.persistMemoryRecords(ctx, job, records)
+	if err := d.persistMemoryRecords(ctx, job, records); err != nil {
+		return err
+	}
+	return d.activateExplicitRemember(ctx, job, toActivate)
 }
 
 // persistMemoryRecords routes each gathered record to the writer that owns its
@@ -526,7 +550,9 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 	if promptVersion == "" {
 		promptVersion = "rule-v1"
 	}
+	explicitRemember := isExplicitRemember(event.MessageType, event.Payload)
 	records := make([]ports.CandidateMemoryRecord, 0, len(candidates))
+	toActivate := make([]ports.CandidateMemoryRecord, 0, len(candidates))
 	for _, candidate := range candidates {
 		id, err := newID()
 		if err != nil {
@@ -584,12 +610,19 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 				Attribution:  attribution,
 			})
 		}
-		records = append(records, ports.CandidateMemoryRecord{Node: node, Evidence: evidence})
+		record := ports.CandidateMemoryRecord{Node: node, Evidence: evidence}
+		records = append(records, record)
+		if explicitRemember && node.ScopeType == "user-global" {
+			toActivate = append(toActivate, record)
+		}
 	}
 	if len(records) == 0 {
 		return nil
 	}
-	return d.persistMemoryRecords(ctx, job, records)
+	if err := d.persistMemoryRecords(ctx, job, records); err != nil {
+		return err
+	}
+	return d.activateExplicitRemember(ctx, job, toActivate)
 }
 
 // captureDeterministicCandidate records a memory that an event already states
@@ -649,6 +682,91 @@ func candidateStatus(scopeType string) (string, bool) {
 		return "active", true
 	}
 	return "candidate", false
+}
+
+// activateExplicitRemember promotes freshly written user-global candidates that
+// came from an explicit user "remember" to active, retrievable memory through
+// the governance service, so the transition is audited and version-checked like
+// any other governance action. It is best-effort: a candidate that is already
+// active or was written by an earlier attempt is safe to skip, and the periodic
+// promotion window re-evaluates the rest.
+func (d *JobDispatcher) activateExplicitRemember(ctx context.Context, job ports.OutboxJob, records []ports.CandidateMemoryRecord) error {
+	if !d.ExplicitRememberAutoActivate || d.Governance == nil || len(records) == 0 {
+		return nil
+	}
+	newID := d.NewID
+	if newID == nil {
+		newID = newUUID
+	}
+	for _, record := range records {
+		auditID, err := newID()
+		if err != nil {
+			return err
+		}
+		requestID, err := newID()
+		if err != nil {
+			return err
+		}
+		_, _ = d.Governance.Apply(ctx, job.TenantID, record.Node.ID, memory.GovernanceCommand{
+			Action:          memory.GovernanceActivate,
+			ExpectedVersion: 1,
+			AuditID:         auditID,
+			ActorType:       "system",
+			ActorID:         "explicit-remember",
+			RequestID:       requestID,
+			At:              time.Now().UTC(),
+			Promotion: &memory.GovernancePromotion{
+				TargetStatus: memory.StatusActive,
+				Confidence:   record.Node.Confidence,
+				Reason:       "explicit_user_remember",
+			},
+		})
+	}
+	return nil
+}
+
+// candidateExplicitRemember reports whether any of a candidate's evidence events
+// is an explicit remember instruction.
+func candidateExplicitRemember(candidate ports.CandidateMemory, explicitByRawID map[string]bool) bool {
+	for _, evidenceID := range candidate.EvidenceEventIDs {
+		if explicitByRawID[evidenceID] {
+			return true
+		}
+	}
+	return false
+}
+
+// isExplicitRemember reports whether an event's declared message type or payload
+// states an explicit instruction to remember. It is deliberately narrower than
+// observation.HasMemoryIntent: only a user's own "remember" is trusted to skip
+// review, so preference/conflict/correction markers do not auto-activate.
+// messageType may be empty when only the normalized payload is available.
+func isExplicitRemember(messageType string, payload json.RawMessage) bool {
+	if strings.Contains(strings.ToLower(messageType), "remember") {
+		return true
+	}
+	var fields map[string]any
+	if json.Unmarshal(payload, &fields) != nil {
+		return false
+	}
+	if declared, ok := fields["message_type"].(string); ok && strings.Contains(strings.ToLower(declared), "remember") {
+		return true
+	}
+	if remember, ok := fields["remember"].(bool); ok && remember {
+		return true
+	}
+	if intent, ok := fields["memory_intent"].(string); ok && strings.EqualFold(strings.TrimSpace(intent), "remember") {
+		return true
+	}
+	if data, ok := fields["data"].(map[string]any); ok {
+		if remember, ok := data["remember"].(bool); ok && remember {
+			return true
+		}
+		if intent, ok := data["memory_intent"].(string); ok && strings.EqualFold(strings.TrimSpace(intent), "remember") {
+			return true
+		}
+	}
+	return false
 }
 
 func candidateContentText(content json.RawMessage) string {

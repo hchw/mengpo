@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hchw/mengpo/internal/application/analysis"
+	"github.com/hchw/mengpo/internal/domain/memory"
 	"github.com/hchw/mengpo/internal/domain/observation"
 	"github.com/hchw/mengpo/internal/ports"
 )
@@ -81,6 +82,13 @@ type fakeSessionOwner struct{ owner string }
 
 func (f fakeSessionOwner) GetSessionOwner(context.Context, string, string) (string, error) {
 	return f.owner, nil
+}
+
+type fakeGovernance struct{ applied []memory.GovernanceCommand }
+
+func (f *fakeGovernance) Apply(_ context.Context, _, _ string, command memory.GovernanceCommand) (memory.GovernanceMutation, error) {
+	f.applied = append(f.applied, command)
+	return memory.GovernanceMutation{}, nil
 }
 
 type countingAnalyst struct {
@@ -319,6 +327,155 @@ func TestExplicitMemoryIntentIsHandledImmediately(t *testing.T) {
 	}
 	if len(runs.started) != 1 || runs.started[0].Trigger != ports.TriggerExplicit || runs.started[0].TaskType != observation.TaskConsolidation {
 		t.Fatalf("immediate run = %#v", runs.started)
+	}
+}
+
+func TestExplicitRememberAutoActivatesWhenEnabled(t *testing.T) {
+	event := observation.Event{
+		ID:          "aaaa1111-1111-4111-8111-111111111111",
+		TenantID:    "tenant-a",
+		SessionID:   "aaaa2222-2222-4222-8222-222222222222",
+		SourceType:  observation.SourceUser,
+		MessageType: "user_remember",
+		Payload:     json.RawMessage(`{"remember":true,"text":"I always want dark mode"}`),
+		OccurredAt:  time.Now().UTC(),
+	}
+	analyst := &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
+		CandidateID:      "explicit-active",
+		EvidenceEventIDs: []string{event.ID},
+		ScopeType:        "user-global",
+		ScopeID:          "user-1",
+		Content:          json.RawMessage(`{"text":"user wants dark mode"}`),
+		Confidence:       0.8,
+	}}}}
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, event, analyst, candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.ExplicitRememberAutoActivate = true
+	governance := &fakeGovernance{}
+	dispatcher.Governance = governance
+
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{
+		ID: "job-remember-active", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID,
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	// The node is written through the candidate writer (which only creates
+	// candidates); activation then happens through governance.
+	if len(candidates.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(candidates.records))
+	}
+	if node := candidates.records[0].Node; node.Status != "candidate" {
+		t.Fatalf("written node status = %q, want candidate", node.Status)
+	}
+	if len(governance.applied) != 1 || governance.applied[0].Action != memory.GovernanceActivate {
+		t.Fatalf("governance apply = %#v, want one activate", governance.applied)
+	}
+	if promotion := governance.applied[0].Promotion; promotion == nil || promotion.TargetStatus != memory.StatusActive {
+		t.Fatalf("promotion = %#v, want active target", governance.applied[0].Promotion)
+	}
+}
+
+func TestExplicitRememberStaysCandidateWhenDisabled(t *testing.T) {
+	event := observation.Event{
+		ID:          "bbbb1111-1111-4111-8111-111111111111",
+		TenantID:    "tenant-a",
+		SessionID:   "bbbb2222-2222-4222-8222-222222222222",
+		SourceType:  observation.SourceUser,
+		MessageType: "user_remember",
+		Payload:     json.RawMessage(`{"remember":true,"text":"I always want dark mode"}`),
+		OccurredAt:  time.Now().UTC(),
+	}
+	analyst := &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
+		CandidateID:      "explicit-gated",
+		EvidenceEventIDs: []string{event.ID},
+		ScopeType:        "user-global",
+		ScopeID:          "user-1",
+		Content:          json.RawMessage(`{"text":"user wants dark mode"}`),
+		Confidence:       0.8,
+	}}}}
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, event, analyst, candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.ExplicitRememberAutoActivate = false
+	governance := &fakeGovernance{}
+	dispatcher.Governance = governance
+
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{
+		ID: "job-remember-gated", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID,
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(candidates.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(candidates.records))
+	}
+	node := candidates.records[0].Node
+	if node.Status != "candidate" || node.DefaultRetrieval {
+		t.Fatalf("gated node = (%s, %v), want (candidate, false)", node.Status, node.DefaultRetrieval)
+	}
+	if len(governance.applied) != 0 {
+		t.Fatalf("disabled auto-activation applied %#v", governance.applied)
+	}
+}
+
+func TestInferredCandidateStaysGatedEvenWhenActivationEnabled(t *testing.T) {
+	// A failure event is gated for analysis but carries no explicit remember, so
+	// it must keep the review gate even when auto-activation is on.
+	event := observation.Event{
+		ID:          "cccc1111-1111-4111-8111-111111111111",
+		TenantID:    "tenant-a",
+		SessionID:   "cccc2222-2222-4222-8222-222222222222",
+		SourceType:  observation.SourceUser,
+		MessageType: "message",
+		Payload:     json.RawMessage(`{"status":"error","text":"migration failed"}`),
+		OccurredAt:  time.Now().UTC(),
+	}
+	analyst := &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
+		CandidateID:      "inferred-1",
+		EvidenceEventIDs: []string{event.ID},
+		ScopeType:        "user-global",
+		ScopeID:          "user-1",
+		Content:          json.RawMessage(`{"text":"the migration command fails"}`),
+		Confidence:       0.6,
+	}}}}
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, event, analyst, candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.ExplicitRememberAutoActivate = true
+	governance := &fakeGovernance{}
+	dispatcher.Governance = governance
+
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{
+		ID: "job-inferred-gated", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID,
+	}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(candidates.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(candidates.records))
+	}
+	if status := candidates.records[0].Node.Status; status != "candidate" {
+		t.Fatalf("inferred candidate status = %q, want candidate", status)
+	}
+	if len(governance.applied) != 0 {
+		t.Fatalf("inferred candidate auto-activated: %#v", governance.applied)
+	}
+}
+
+func TestIsExplicitRemember(t *testing.T) {
+	cases := []struct {
+		name        string
+		messageType string
+		payload     string
+		want        bool
+	}{
+		{"message type", "user_remember", `{}`, true},
+		{"payload flag", "message", `{"remember":true}`, true},
+		{"normalized payload", "", `{"data":{"remember":true},"message_type":"user_remember"}`, true},
+		{"memory intent", "message", `{"memory_intent":"remember"}`, true},
+		{"forget is not remember", "user_forget", `{"forget":true}`, false},
+		{"ordinary", "message", `{"text":"hi"}`, false},
+	}
+	for _, tc := range cases {
+		if got := isExplicitRemember(tc.messageType, json.RawMessage(tc.payload)); got != tc.want {
+			t.Errorf("isExplicitRemember(%q, %s) = %v, want %v", tc.messageType, tc.payload, got, tc.want)
+		}
 	}
 }
 

@@ -80,6 +80,12 @@ type LLMConfig struct {
 type AnalysisConfig struct {
 	MaxTokens            int
 	MaintenanceBatchSize int
+	// ExplicitRememberAutoActivate makes an explicit user instruction to
+	// remember (a "user_remember" event or a payload remember flag) take effect
+	// immediately: the user-global memory is written active and retrievable
+	// instead of waiting for candidate review. Inferred candidates keep the
+	// governance gate regardless of this switch.
+	ExplicitRememberAutoActivate bool
 }
 
 // SchedulerConfig selects the periodic-scheduling component. Adapter is one of
@@ -180,8 +186,9 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 			MaxRequestBytes: 1 << 20,
 		},
 		Analysis: AnalysisConfig{
-			MaxTokens:            2048,
-			MaintenanceBatchSize: 50,
+			MaxTokens:                    2048,
+			MaintenanceBatchSize:         50,
+			ExplicitRememberAutoActivate: true,
 		},
 		Scheduler: SchedulerConfig{
 			Adapter:          "internal",
@@ -234,6 +241,9 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 		return Config{}, err
 	}
 	cfg.Analysis.MaintenanceBatchSize = int(maintenanceBatch)
+	if cfg.Analysis.ExplicitRememberAutoActivate, err = envBool(lookup, envNames("MEMORY_EXPLICIT_REMEMBER_AUTO_ACTIVATE"), cfg.Analysis.ExplicitRememberAutoActivate); err != nil {
+		return Config{}, err
+	}
 	cfg.Scheduler.Adapter = envString(lookup, envNames("MEMORY_SCHEDULER_ADAPTER"), cfg.Scheduler.Adapter)
 	if cfg.Scheduler.DefaultInterval, err = envDuration(lookup, envNames("MEMORY_SCHEDULE_DEFAULT_INTERVAL"), cfg.Scheduler.DefaultInterval); err != nil {
 		return Config{}, err

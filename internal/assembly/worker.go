@@ -110,24 +110,26 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		provider = "memory-llm"
 	}
 	dispatcher := &JobDispatcher{
-		Observations:         postgres.NewObservationRepository(router),
-		Normalized:           postgres.NewNormalizedEventRepository(router),
-		Analysis:             analysis.NewWithPrivacy(analysis.Providers{Analyst: dynamic}, analysis.PrivacyPolicy{}),
-		AnalysisReader:       postgres.NewNormalizedEventRepository(router),
-		Candidates:           postgres.NewCandidateRepository(router),
-		WorkingMemory:        postgres.NewWorkingMemoryRepository(router),
-		SessionOwner:         postgres.NewSessionRepository(router),
-		Runs:                 postgres.NewAnalystRunRepository(router),
-		Audit:                postgres.NewAuditRepository(router),
-		SchemaVersion:        "schema-v1",
-		NormalizationVersion: "normalize-v1",
-		PromptVersion:        promptVersion,
-		Provider:             provider,
-		Model:                cfg.Providers.MemoryLLM.Model,
-		NewID:                newUUID,
+		Observations:                 postgres.NewObservationRepository(router),
+		Normalized:                   postgres.NewNormalizedEventRepository(router),
+		Analysis:                     analysis.NewWithPrivacy(analysis.Providers{Analyst: dynamic}, analysis.PrivacyPolicy{}),
+		AnalysisReader:               postgres.NewNormalizedEventRepository(router),
+		Candidates:                   postgres.NewCandidateRepository(router),
+		WorkingMemory:                postgres.NewWorkingMemoryRepository(router),
+		SessionOwner:                 postgres.NewSessionRepository(router),
+		Runs:                         postgres.NewAnalystRunRepository(router),
+		Audit:                        postgres.NewAuditRepository(router),
+		SchemaVersion:                "schema-v1",
+		NormalizationVersion:         "normalize-v1",
+		PromptVersion:                promptVersion,
+		Provider:                     provider,
+		Model:                        cfg.Providers.MemoryLLM.Model,
+		NewID:                        newUUID,
+		ExplicitRememberAutoActivate: cfg.Analysis.ExplicitRememberAutoActivate,
 	}
 	opsMetrics := observability.NewOpsMetrics()
 	dispatcher.AnalysisMetrics = opsMetrics
+	dispatcher.Governance = governance.NewService(postgres.NewMemoryRepository(router))
 	options.Handle = dispatcher.Handle
 	options.Providers = providerService
 	runner := &workers.OutboxRunner{
