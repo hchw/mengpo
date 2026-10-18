@@ -42,6 +42,7 @@ type MemberRecord struct {
 type PendingAnalysisEvent struct {
 	NormalizedID string
 	RawEventID   string
+	UserID       string
 	SessionID    string
 	OccurredAt   time.Time
 	Payload      json.RawMessage

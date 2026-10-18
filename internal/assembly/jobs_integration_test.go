@@ -11,7 +11,9 @@ import (
 
 	"github.com/hchw/mengpo/internal/adapters/postgres"
 	"github.com/hchw/mengpo/internal/application/analysis"
+	"github.com/hchw/mengpo/internal/application/governance"
 	appobservation "github.com/hchw/mengpo/internal/application/observation"
+	"github.com/hchw/mengpo/internal/application/recall"
 	obsdomain "github.com/hchw/mengpo/internal/domain/observation"
 	"github.com/hchw/mengpo/internal/platform/registry"
 	"github.com/hchw/mengpo/internal/platform/tenantdb"
@@ -189,5 +191,215 @@ VALUES ($1::uuid, $2::uuid, 'v1', '{"data":{"summary":"distilled span"}}'::jsonb
 	}
 	if err := dispatcher.Handle(ctx, job); err != nil {
 		t.Fatalf("consolidate must read normalized events without error, got %v", err)
+	}
+}
+
+// TestSessionlessExplicitRememberBecomesRecallable drives the full path for a
+// remember that carries no session: the observation's own owner scopes the
+// memory, it is activated, and it is recallable without a session id.
+func TestSessionlessExplicitRememberBecomesRecallable(t *testing.T) {
+	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set MEMORY_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	store := registry.NewStore(db)
+	tenant := createMigratedTenant(t, ctx, db, store, "sessionless remember")
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, tenant.ID)
+	})
+	router := tenantdb.NewRouter(db, store)
+
+	const userID = "00000000-0000-4000-8000-0000000000f1"
+	gateway := appobservation.NewGateway(postgres.NewObservationRepository(router))
+	event, created, err := gateway.IngestMessage(ctx, appobservation.Principal{
+		TenantID:        tenant.ID,
+		SourceID:        userID,
+		SourceType:      obsdomain.SourceUser,
+		AccessLevel:     obsdomain.Level0,
+		DeploymentBound: true,
+	}, appobservation.Input{
+		ConversationID: "conv-sessionless",
+		UserID:         userID,
+		MessageType:    "user_remember",
+		IdempotencyKey: "sessionless-remember-1",
+		Payload:        json.RawMessage(`{"remember":true,"text":"always set GOPROXY"}`),
+		PayloadText:    "always set GOPROXY",
+		Visibility:     obsdomain.VisibilitySession,
+		Reliability:    obsdomain.ReliabilityHigh,
+		RetentionClass: "standard",
+	})
+	if err != nil || !created {
+		t.Fatalf("observe: created=%v err=%v", created, err)
+	}
+	if event.UserID != userID {
+		t.Fatalf("stored observation owner = %q, want %q", event.UserID, userID)
+	}
+
+	outbox := postgres.NewOutboxRepository(router)
+	jobs, err := outbox.LeaseJobs(ctx, tenant.ID, "worker-test", 5, time.Minute)
+	if err != nil || len(jobs) == 0 {
+		t.Fatalf("leased jobs=%#v err=%v", jobs, err)
+	}
+	dispatcher := &JobDispatcher{
+		Observations:                 postgres.NewObservationRepository(router),
+		Normalized:                   postgres.NewNormalizedEventRepository(router),
+		Candidates:                   postgres.NewCandidateRepository(router),
+		Analysis:                     analysis.New(analysis.Providers{Analyst: analysis.RuleFallback{}}),
+		Governance:                   governance.NewService(postgres.NewMemoryRepository(router)),
+		ExplicitRememberAutoActivate: true,
+		SchemaVersion:                "schema-v1",
+		NormalizationVersion:         "normalize-v1",
+		NewID:                        newUUID,
+	}
+	for _, job := range jobs {
+		if err := dispatcher.Handle(ctx, job); err != nil {
+			t.Fatalf("dispatch %s: %v", job.JobType, err)
+		}
+	}
+
+	var status, scopeType, owner string
+	var retrievable bool
+	if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT status, scope_type, user_id::text, default_retrieval FROM memory_nodes WHERE user_id=$1::uuid AND scope_type='user-global' ORDER BY created_at DESC LIMIT 1`, userID).Scan(&status, &scopeType, &owner, &retrievable)
+	}); err != nil {
+		t.Fatalf("sessionless remember was not persisted: %v", err)
+	}
+	if status != "active" || scopeType != "user-global" || owner != userID || !retrievable {
+		t.Fatalf("remembered node = status:%s scope:%s owner:%s retrievable:%v", status, scopeType, owner, retrievable)
+	}
+
+	service := recall.NewService(
+		postgres.NewSearchRepository(router),
+		postgres.NewRelationRepository(router),
+		postgres.NewMemoryRepository(router),
+		postgres.NewEmbeddingRepository(router),
+	)
+	candidates, _, err := service.RecallWithMeta(ctx, tenant.ID, userID, "", recall.RecallRequest{Query: "GOPROXY"})
+	if err != nil {
+		t.Fatalf("RecallWithMeta() error = %v", err)
+	}
+	found := false
+	for _, candidate := range candidates {
+		if candidate.Node.UserID == userID && candidate.Node.ScopeType == "user-global" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sessionless memory not recalled without a session; got %d candidates", len(candidates))
+	}
+}
+
+// TestSessionBoundarySummaryScopeRequiresSession pins the boundary: a session
+// boundary yields session working memory only when a session is present, while a
+// sessionless observation can only yield user-global memory.
+func TestSessionBoundarySummaryScopeRequiresSession(t *testing.T) {
+	dsn := os.Getenv("MEMORY_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set MEMORY_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	store := registry.NewStore(db)
+
+	const (
+		userID    = "00000000-0000-4000-8000-0000000000f2"
+		sessionID = "00000000-0000-4000-8000-0000000000f3"
+	)
+	for _, tc := range []struct {
+		name       string
+		sessionID  string
+		wantMemory bool
+	}{
+		{"with session", sessionID, true},
+		{"without session", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := createMigratedTenant(t, ctx, db, store, "boundary "+tc.name)
+			t.Cleanup(func() {
+				_, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+tenant.Schema+` CASCADE`)
+				_, _ = db.ExecContext(context.Background(), `DELETE FROM public.tenants WHERE id=$1`, tenant.ID)
+			})
+			router := tenantdb.NewRouter(db, store)
+			if tc.sessionID != "" {
+				if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+					_, err := tx.ExecContext(ctx, `INSERT INTO sessions (id, user_id, status) VALUES ($1::uuid, $2::uuid, 'active')`, tc.sessionID, userID)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gateway := appobservation.NewGateway(postgres.NewObservationRepository(router))
+			if _, _, err := gateway.IngestWorkflow(ctx, appobservation.Principal{
+				TenantID: tenant.ID, SourceID: userID, AccessLevel: obsdomain.Level0, DeploymentBound: true,
+			}, appobservation.Input{
+				SessionID: tc.sessionID, ConversationID: "conv-boundary", UserID: userID, MessageType: "context.compaction",
+				IdempotencyKey: "boundary-" + tc.name,
+				Payload:        json.RawMessage(`{"context_summary":true,"summary":"the build needs GOPROXY"}`),
+				PayloadText:    "the build needs GOPROXY", Visibility: obsdomain.VisibilitySession,
+				Reliability: obsdomain.ReliabilityHigh, RetentionClass: "standard",
+			}); err != nil {
+				t.Fatalf("observe boundary: %v", err)
+			}
+
+			outbox := postgres.NewOutboxRepository(router)
+			jobs, err := outbox.LeaseJobs(ctx, tenant.ID, "worker-test", 5, time.Minute)
+			if err != nil || len(jobs) == 0 {
+				t.Fatalf("leased jobs=%#v err=%v", jobs, err)
+			}
+			dispatcher := &JobDispatcher{
+				Observations:         postgres.NewObservationRepository(router),
+				Normalized:           postgres.NewNormalizedEventRepository(router),
+				WorkingMemory:        postgres.NewWorkingMemoryRepository(router),
+				Candidates:           postgres.NewCandidateRepository(router),
+				SessionOwner:         postgres.NewSessionRepository(router),
+				Analysis:             analysis.New(analysis.Providers{Analyst: analysis.RuleFallback{}}),
+				SchemaVersion:        "schema-v1",
+				NormalizationVersion: "normalize-v1",
+				NewID:                newUUID,
+			}
+			for _, job := range jobs {
+				if err := dispatcher.Handle(ctx, job); err != nil {
+					t.Fatalf("dispatch %s: %v", job.JobType, err)
+				}
+			}
+
+			var count int
+			if err := router.WithTenantTx(ctx, tenant.ID, func(tx *sql.Tx) error {
+				return tx.QueryRowContext(ctx, `SELECT count(*) FROM memory_nodes WHERE scope_type='session'`).Scan(&count)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantMemory && count != 1 {
+				t.Fatalf("session boundary produced %d session memories, want 1", count)
+			}
+			if !tc.wantMemory && count != 0 {
+				t.Fatalf("sessionless boundary produced %d session memories, want 0", count)
+			}
+		})
 	}
 }

@@ -43,6 +43,7 @@ type Principal struct {
 type Input struct {
 	SourceEventID  string
 	IdempotencyKey string
+	UserID         string
 	SessionID      string
 	ConversationID string
 	MessageType    string
@@ -101,7 +102,7 @@ func (g *Gateway) Ingest(ctx context.Context, principal Principal, input Input) 
 	}
 	event := observation.Event{
 		ID: id, SourceEventID: input.SourceEventID, IdempotencyKey: input.IdempotencyKey,
-		TenantID: principal.TenantID, SessionID: input.SessionID, ConversationID: input.ConversationID,
+		TenantID: principal.TenantID, UserID: input.UserID, SessionID: input.SessionID, ConversationID: input.ConversationID,
 		SourceType: principal.SourceType, SourceID: principal.SourceID, MessageType: input.MessageType,
 		Payload: input.Payload, PayloadText: input.PayloadText, Sequence: input.Sequence,
 		ParentEventID: input.ParentEventID, OccurredAt: input.OccurredAt.UTC(),

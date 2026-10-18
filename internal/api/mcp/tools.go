@@ -112,7 +112,9 @@ Call this in the SAME turn the user states or CONFIRMS something durable. Typica
 - The user asks you to remember something, or repeats something you have clearly forgotten.
 - The user REJECTS or overrides an earlier decision: first invalidate the superseded memory with memory_forget, then remember the new decision here.
 
-Record one focused fact per call. Skip one-off, transient, or easily re-derived details (exact commands already in the repo, values you can read from files).`,
+Record one focused fact per call. Skip one-off, transient, or easily re-derived details (exact commands already in the repo, values you can read from files).
+
+Scope: pass the session_id returned by memory_bind_session to attach the memory to the current session; omit it to store a durable user-global memory. Omitting it never drops the memory.`,
 	}
 }
 
@@ -145,7 +147,9 @@ func observeTool() *sdkmcp.Tool {
 
 Call this to capture user BEHAVIOR and SENTIMENT that should shape future interactions but is not a clean durable statement — for example the user is dissatisfied or annoyed with a result, frustrated by a repeated mistake, reacts strongly to an approach, or gives negative feedback without stating a new rule. One event per call; keep the original wording in text and any structured signals in payload.
 
-Advanced: prefer memory_remember for explicit durable instructions, and memory_forget/memory_correct to retire or fix memories. Do not fabricate events or invent details the user did not express.`,
+Advanced: prefer memory_remember for explicit durable instructions, and memory_forget/memory_correct to retire or fix memories. Do not fabricate events or invent details the user did not express.
+
+Scope: pass the session_id returned by memory_bind_session to allow session working memory; omit it to record a durable user-global observation. Omitting it never drops the observation.`,
 	}
 }
 

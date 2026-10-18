@@ -100,6 +100,18 @@ func (r *MemoryRepository) MergeMemories(ctx context.Context, tenantID string, r
 				WHERE id = $1::uuid AND deleted_at IS NULL`, duplicate.ID); err != nil {
 				return fmt.Errorf("retire merged duplicate: %w", err)
 			}
+			// Union the duplicate's evidence rows onto the target so governance
+			// readers (which only read memory_evidence) see the corroboration.
+			// The duplicate's own rows are kept for lineage; the unique
+			// constraint prevents double counting the same raw event.
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO memory_evidence (id, memory_id, raw_event_id, normalized_event_id, evidence_role, confidence, attribution)
+SELECT gen_random_uuid(), $1::uuid, raw_event_id, normalized_event_id, evidence_role, confidence, attribution
+FROM memory_evidence
+WHERE memory_id = $2::uuid
+ON CONFLICT (memory_id, raw_event_id, evidence_role) DO NOTHING`, target.ID, duplicate.ID); err != nil {
+				return fmt.Errorf("merge memory evidence: %w", err)
+			}
 		}
 		auditID, err := newIDForMerge()
 		if err != nil {

@@ -19,7 +19,7 @@ func NewObservationRepository(router *tenantdb.Router) *ObservationRepository {
 	return &ObservationRepository{router: router}
 }
 
-const observationColumns = `id::text, COALESCE(source_event_id, ''), idempotency_key, COALESCE(session_id::text, ''), COALESCE(conversation_id, ''), source_type, source_id, message_type, payload, COALESCE(payload_text, ''), sequence, COALESCE(parent_event_id::text, ''), occurred_at, visibility, reliability, retention_class, access_level, trace_metadata, attribution_level`
+const observationColumns = `id::text, COALESCE(source_event_id, ''), idempotency_key, COALESCE(session_id::text, ''), COALESCE(conversation_id, ''), source_type, source_id, message_type, payload, COALESCE(payload_text, ''), sequence, COALESCE(parent_event_id::text, ''), occurred_at, visibility, reliability, retention_class, access_level, trace_metadata, attribution_level, COALESCE(user_id::text, '')`
 
 // GetObservation loads one raw event by id within the caller's tenant schema.
 func (r *ObservationRepository) GetObservation(ctx context.Context, tenantID, eventID string) (observation.Event, error) {
@@ -35,7 +35,7 @@ func (r *ObservationRepository) GetObservation(ctx context.Context, tenantID, ev
 		err := tx.QueryRowContext(ctx, `SELECT `+observationColumns+` FROM observed_events WHERE id = $1::uuid`, eventID).Scan(
 			&stored.ID, &sourceEvent, &stored.IdempotencyKey, &session, &conversation, &stored.SourceType, &stored.SourceID,
 			&stored.MessageType, &storedPayload, &stored.PayloadText, &sequence, &parent, &stored.OccurredAt,
-			&stored.Visibility, &stored.Reliability, &stored.RetentionClass, &accessLevel, &storedTrace, &attribution)
+			&stored.Visibility, &stored.Reliability, &stored.RetentionClass, &accessLevel, &storedTrace, &attribution, &stored.UserID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ports.ErrObservationNotFound
 		}
@@ -93,26 +93,26 @@ func (r *ObservationRepository) StoreObservation(ctx context.Context, event obse
 	var accessLevel, attribution string
 	var created bool
 	err = r.router.WithTenantTx(ctx, event.TenantID, func(tx *sql.Tx) error {
-		const columns = `id::text, COALESCE(source_event_id, ''), idempotency_key, COALESCE(session_id::text, ''), COALESCE(conversation_id, ''), source_type, source_id, message_type, payload, COALESCE(payload_text, ''), sequence, COALESCE(parent_event_id::text, ''), occurred_at, visibility, reliability, retention_class, access_level, trace_metadata, attribution_level`
+		const columns = observationColumns
 		const scan = `SELECT `
 		rowErr := tx.QueryRowContext(ctx, `
 			INSERT INTO observed_events
-				(id, source_event_id, idempotency_key, session_id, conversation_id, source_type, source_id, message_type, payload, payload_text, sequence, parent_event_id, occurred_at, visibility, reliability, retention_class, access_level, trace_metadata, attribution_level)
-			VALUES ($1::uuid, NULLIF($2, ''), $3, NULLIF($4, '')::uuid, NULLIF($5, ''), $6, $7, $8, $9::jsonb, NULLIF($10, ''), $11, NULLIF($12, '')::uuid, $13, $14, $15, $16, $17, $18::jsonb, $19)
+				(id, source_event_id, idempotency_key, session_id, conversation_id, source_type, source_id, message_type, payload, payload_text, sequence, parent_event_id, occurred_at, visibility, reliability, retention_class, access_level, trace_metadata, attribution_level, user_id)
+			VALUES ($1::uuid, NULLIF($2, ''), $3, NULLIF($4, '')::uuid, NULLIF($5, ''), $6, $7, $8, $9::jsonb, NULLIF($10, ''), $11, NULLIF($12, '')::uuid, $13, $14, $15, $16, $17, $18::jsonb, $19, NULLIF($20, '')::uuid)
 			ON CONFLICT (idempotency_key) DO NOTHING
 			RETURNING `+columns,
 			event.ID, event.SourceEventID, event.IdempotencyKey, event.SessionID, event.ConversationID, event.SourceType,
 			event.SourceID, event.MessageType, []byte(payload), event.PayloadText, event.Sequence, event.ParentEventID,
-			event.OccurredAt, event.Visibility, event.Reliability, event.RetentionClass, event.AccessLevel, traceJSON, event.Attribution.Level,
+			event.OccurredAt, event.Visibility, event.Reliability, event.RetentionClass, event.AccessLevel, traceJSON, event.Attribution.Level, event.UserID,
 		).Scan(&stored.ID, &sourceEvent, &stored.IdempotencyKey, &session, &conversation, &stored.SourceType,
 			&stored.SourceID, &stored.MessageType, &storedPayload, &stored.PayloadText, &sequence, &parent,
-			&stored.OccurredAt, &stored.Visibility, &stored.Reliability, &stored.RetentionClass, &accessLevel, &storedTrace, &attribution)
+			&stored.OccurredAt, &stored.Visibility, &stored.Reliability, &stored.RetentionClass, &accessLevel, &storedTrace, &attribution, &stored.UserID)
 		created = rowErr == nil
 		if errors.Is(rowErr, sql.ErrNoRows) {
 			rowErr = tx.QueryRowContext(ctx, scan+columns+` FROM observed_events WHERE idempotency_key = $1`, event.IdempotencyKey).Scan(
 				&stored.ID, &sourceEvent, &stored.IdempotencyKey, &session, &conversation, &stored.SourceType, &stored.SourceID,
 				&stored.MessageType, &storedPayload, &stored.PayloadText, &sequence, &parent, &stored.OccurredAt,
-				&stored.Visibility, &stored.Reliability, &stored.RetentionClass, &accessLevel, &storedTrace, &attribution)
+				&stored.Visibility, &stored.Reliability, &stored.RetentionClass, &accessLevel, &storedTrace, &attribution, &stored.UserID)
 		}
 		if rowErr != nil {
 			return fmt.Errorf("store observation: %w", rowErr)
@@ -120,7 +120,7 @@ func (r *ObservationRepository) StoreObservation(ctx context.Context, event obse
 		stored.SourceEventID = sourceEvent.String
 		if stored.SourceType != event.SourceType || stored.SourceID != event.SourceID || stored.SourceEventID != event.SourceEventID ||
 			stored.MessageType != event.MessageType || !sameJSON(storedPayload, payload) || accessLevel != string(event.AccessLevel) ||
-			attribution != string(event.Attribution.Level) || !sameJSON(storedTrace, traceJSON) {
+			attribution != string(event.Attribution.Level) || !sameJSON(storedTrace, traceJSON) || stored.UserID != event.UserID {
 			return errors.New("observation idempotency conflict")
 		}
 		if created {

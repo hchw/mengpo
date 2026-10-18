@@ -99,3 +99,46 @@ func TestAnalysisRejectsMissingTenantAndWrapsProviderErrors(t *testing.T) {
 		t.Fatal("expected provider error")
 	}
 }
+
+func confirmationBatch() ports.AnalysisBatch {
+	return ports.AnalysisBatch{
+		TenantID: "tenant-a", RunID: "run-1", PromptVersion: "prompt-v1", SchemaVersion: "schema-v1",
+		Candidates: []ports.CandidateMemory{
+			{CandidateID: "m1", ScopeType: "user-global", ScopeID: "u1", Content: []byte(`{"text":"a"}`), Confidence: 0.5},
+			{CandidateID: "m2", ScopeType: "user-global", ScopeID: "u1", Content: []byte(`{"text":"b"}`), Confidence: 0.5},
+		},
+	}
+}
+
+func TestConfirmSameFactFailsClosed(t *testing.T) {
+	positive := New(Providers{Analyst: &mockAnalyst{result: ports.AnalystResult{
+		Conflicts: []ports.ConflictAssessment{{CandidateIDs: []string{"m1", "m2"}, SameFact: true}},
+	}}})
+	if ok, err := positive.ConfirmSameFact(context.Background(), confirmationBatch()); err != nil || !ok {
+		t.Fatalf("positive confirmation = (%v,%v), want (true,nil)", ok, err)
+	}
+
+	negative := New(Providers{Analyst: &mockAnalyst{result: ports.AnalystResult{
+		Conflicts: []ports.ConflictAssessment{{CandidateIDs: []string{"m1", "m2"}, SameFact: false}},
+	}}})
+	if ok, err := negative.ConfirmSameFact(context.Background(), confirmationBatch()); err != nil || ok {
+		t.Fatalf("negative confirmation = (%v,%v), want (false,nil)", ok, err)
+	}
+
+	conflict := New(Providers{Analyst: &mockAnalyst{result: ports.AnalystResult{
+		Conflicts: []ports.ConflictAssessment{{CandidateIDs: []string{"m1", "m2"}, Conflicted: true, ReasonCode: "contradicts", SameFact: true}},
+	}}})
+	if ok, err := conflict.ConfirmSameFact(context.Background(), confirmationBatch()); err != nil || ok {
+		t.Fatalf("conflicting confirmation = (%v,%v), want (false,nil)", ok, err)
+	}
+
+	failed := New(Providers{Analyst: &mockAnalyst{err: errors.New("model unavailable")}})
+	if ok, err := failed.ConfirmSameFact(context.Background(), confirmationBatch()); err == nil || ok {
+		t.Fatalf("failed confirmation = (%v,%v), want (false,error)", ok, err)
+	}
+
+	var nilService *Service
+	if ok, err := nilService.ConfirmSameFact(context.Background(), confirmationBatch()); err != nil || ok {
+		t.Fatalf("nil service confirmation = (%v,%v), want (false,nil)", ok, err)
+	}
+}

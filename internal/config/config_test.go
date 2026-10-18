@@ -116,3 +116,42 @@ func TestLoadFromParsesTimeoutAndRequestSize(t *testing.T) {
 		t.Fatal("explicit privacy opt-in should be honored")
 	}
 }
+
+func TestSemanticDedupeDefaultsAndOverrides(t *testing.T) {
+	databaseURL := "postgres://memory:memory@localhost/memory"
+	cfg, err := LoadFrom(lookup(map[string]string{"DATABASE_URL": databaseURL}))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	if !cfg.Analysis.SemanticDedupeEnabled || !cfg.Analysis.SemanticMergeEnabled {
+		t.Fatalf("semantic dedupe/merge should default on: %#v", cfg.Analysis)
+	}
+	if cfg.Analysis.SemanticSimilarityThreshold != 0.90 || cfg.Analysis.SemanticDedupeLexicalFallback {
+		t.Fatalf("unexpected semantic defaults: %#v", cfg.Analysis)
+	}
+	overridden, err := LoadFrom(lookup(map[string]string{
+		"DATABASE_URL":                            databaseURL,
+		"MEMORY_SEMANTIC_DEDUPE_ENABLED":          "false",
+		"MEMORY_SEMANTIC_MERGE_ENABLED":           "false",
+		"MEMORY_SEMANTIC_SIMILARITY_THRESHOLD":    "0.75",
+		"MEMORY_SEMANTIC_DEDUPE_LEXICAL_FALLBACK": "true",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	if overridden.Analysis.SemanticDedupeEnabled || overridden.Analysis.SemanticMergeEnabled || overridden.Analysis.SemanticSimilarityThreshold != 0.75 || !overridden.Analysis.SemanticDedupeLexicalFallback {
+		t.Fatalf("semantic overrides not applied: %#v", overridden.Analysis)
+	}
+}
+
+func TestSemanticSimilarityThresholdRange(t *testing.T) {
+	databaseURL := "postgres://memory:memory@localhost/memory"
+	for _, value := range []string{"0", "1", "-0.1", "1.5"} {
+		if _, err := LoadFrom(lookup(map[string]string{
+			"DATABASE_URL":                         databaseURL,
+			"MEMORY_SEMANTIC_SIMILARITY_THRESHOLD": value,
+		})); err == nil {
+			t.Fatalf("threshold %q should be rejected", value)
+		}
+	}
+}

@@ -23,6 +23,7 @@ type AnalysisBatch struct {
 
 type AnalysisEvent struct {
 	EventID     string          `json:"event_id"`
+	UserID      string          `json:"user_id,omitempty"`
 	SessionID   string          `json:"session_id,omitempty"`
 	OccurredAt  time.Time       `json:"occurred_at"`
 	MessageType string          `json:"message_type,omitempty"`
@@ -63,6 +64,10 @@ type ConflictAssessment struct {
 	CandidateIDs []string `json:"candidate_ids"`
 	Conflicted   bool     `json:"conflicted"`
 	ReasonCode   string   `json:"reason_code"`
+	// SameFact is set by the duplicate-confirmation task: true only when the
+	// model judges the candidates to state the same fact. It is never true on a
+	// conflict.
+	SameFact bool `json:"same_fact,omitempty"`
 }
 
 // AnalysisUsage reports provider metering for a single analysis call. It is

@@ -129,8 +129,29 @@ func TestObserveDelegatesTenantBoundIdentityAndPayload(t *testing.T) {
 	if ingestor.principal.TenantID != "tenant-a" || ingestor.principal.SourceID != "agent-a" || !ingestor.principal.AgentBound {
 		t.Fatalf("principal=%#v", ingestor.principal)
 	}
-	if ingestor.input.SessionID != "session-a" || ingestor.input.SourceEventID != "src-1" || ingestor.input.PayloadText != "hello" {
+	if ingestor.input.UserID != "user-a" || ingestor.input.SessionID != "session-a" || ingestor.input.SourceEventID != "src-1" || ingestor.input.PayloadText != "hello" {
 		t.Fatalf("input=%#v", ingestor.input)
+	}
+}
+
+// TestObserveAnchorsOwnerWithoutSession proves the ingress records the trusted
+// owner even when no session is bound, so a user-global write can be owned.
+func TestObserveAnchorsOwnerWithoutSession(t *testing.T) {
+	ingestor := &fakeIngestor{event: obsdomain.Event{ID: "event-1", TenantID: "tenant-a"}, created: true}
+	service := NewService(ServiceOptions{Gateway: ingestor})
+	identity := agentIdentity()
+	identity.ScopeType = "user-global"
+	identity.SessionID = ""
+	ctx := WithIdentity(context.Background(), identity)
+	env := envelope(dto.Scope{TenantID: "tenant-a", UserID: "user-a", Type: "user-global"}, dto.Principal{Type: "agent", ID: "agent-a"}, `{"text":"hello"}`)
+	if _, err := service.Observe(ctx, env); err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if ingestor.input.UserID != "user-a" {
+		t.Fatalf("owner = %q, want user-a", ingestor.input.UserID)
+	}
+	if ingestor.input.SessionID != "" {
+		t.Fatalf("session = %q, want empty", ingestor.input.SessionID)
 	}
 }
 

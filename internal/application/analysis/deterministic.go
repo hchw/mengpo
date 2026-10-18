@@ -17,11 +17,6 @@ import (
 // for the event, so a missing, disabled, or unreachable model does not silently
 // drop explicit instructions or session summaries.
 func DeterministicCandidate(event ports.AnalysisEvent) (ports.CandidateMemory, bool) {
-	// Events without a session are skipped because a memory cannot be
-	// attributed to an owner without one.
-	if strings.TrimSpace(event.SessionID) == "" {
-		return ports.CandidateMemory{}, false
-	}
 	text := eventText(event.Payload)
 	if text == "" {
 		return ports.CandidateMemory{}, false
@@ -29,17 +24,29 @@ func DeterministicCandidate(event ports.AnalysisEvent) (ports.CandidateMemory, b
 	switch {
 	case carriesRemember(event):
 		// An explicit instruction is durable and belongs to the user, not the
-		// session; the evidence session is used only to resolve the owner.
+		// session. The observation's own owner is authoritative; when the event
+		// carries no owner (legacy events) the session is the fallback.
+		owner := strings.TrimSpace(event.UserID)
+		if owner == "" {
+			owner = strings.TrimSpace(event.SessionID)
+		}
+		if owner == "" {
+			return ports.CandidateMemory{}, false
+		}
 		return ports.CandidateMemory{
 			CandidateID:      "rule:remember:" + event.EventID,
 			EvidenceEventIDs: []string{event.EventID},
 			ScopeType:        "user-global",
-			ScopeID:          event.SessionID,
+			ScopeID:          owner,
 			Content:          encodedContent(map[string]string{"text": text}),
 			Confidence:       0.9,
 		}, true
 	case observation.IsSessionBoundary(observation.Event{MessageType: event.MessageType}):
-		// A compaction or branch summary is the session's own working memory.
+		// A compaction or branch summary is the session's own working memory,
+		// so it is meaningless without a session to attach it to.
+		if strings.TrimSpace(event.SessionID) == "" {
+			return ports.CandidateMemory{}, false
+		}
 		return ports.CandidateMemory{
 			CandidateID:      "rule:summary:" + event.EventID,
 			EvidenceEventIDs: []string{event.EventID},

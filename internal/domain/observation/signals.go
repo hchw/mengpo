@@ -167,6 +167,9 @@ const (
 	TaskConsolidation   = "consolidate_memory"
 	TaskConflictScan    = "analyze_conflict"
 	TaskProposeTransfer = "propose_transfer"
+	// TaskConfirmDuplicate asks the model whether two memories state the same
+	// fact. It is the mandatory guard before a near-duplicate merge.
+	TaskConfirmDuplicate = "confirm_duplicate"
 )
 
 var memoryIntentMarkers = []string{"remember", "forget", "correct", "preference", "conflict", "memory_intent"}

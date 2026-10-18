@@ -86,6 +86,18 @@ type AnalysisConfig struct {
 	// instead of waiting for candidate review. Inferred candidates keep the
 	// governance gate regardless of this switch.
 	ExplicitRememberAutoActivate bool
+	// SemanticDedupeEnabled turns on semantic (embedding-based) near-duplicate
+	// grouping for candidate review and maintenance reporting.
+	SemanticDedupeEnabled bool
+	// SemanticMergeEnabled lets the maintenance pipeline actually merge
+	// near-duplicate memories. When false the pipeline only reports groups.
+	SemanticMergeEnabled bool
+	// SemanticSimilarityThreshold is the cosine similarity at or above which
+	// two memories in the same scope are treated as near duplicates.
+	SemanticSimilarityThreshold float64
+	// SemanticDedupeLexicalFallback enables a pg_trgm lexical fallback for
+	// grouping when a memory has no usable embedding.
+	SemanticDedupeLexicalFallback bool
 }
 
 // SchedulerConfig selects the periodic-scheduling component. Adapter is one of
@@ -186,9 +198,13 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 			MaxRequestBytes: 1 << 20,
 		},
 		Analysis: AnalysisConfig{
-			MaxTokens:                    2048,
-			MaintenanceBatchSize:         50,
-			ExplicitRememberAutoActivate: true,
+			MaxTokens:                     2048,
+			MaintenanceBatchSize:          50,
+			ExplicitRememberAutoActivate:  true,
+			SemanticDedupeEnabled:         true,
+			SemanticMergeEnabled:          true,
+			SemanticSimilarityThreshold:   0.90,
+			SemanticDedupeLexicalFallback: false,
 		},
 		Scheduler: SchedulerConfig{
 			Adapter:          "internal",
@@ -242,6 +258,18 @@ func LoadFrom(lookup LookupEnv) (Config, error) {
 	}
 	cfg.Analysis.MaintenanceBatchSize = int(maintenanceBatch)
 	if cfg.Analysis.ExplicitRememberAutoActivate, err = envBool(lookup, envNames("MEMORY_EXPLICIT_REMEMBER_AUTO_ACTIVATE"), cfg.Analysis.ExplicitRememberAutoActivate); err != nil {
+		return Config{}, err
+	}
+	if cfg.Analysis.SemanticDedupeEnabled, err = envBool(lookup, envNames("MEMORY_SEMANTIC_DEDUPE_ENABLED"), cfg.Analysis.SemanticDedupeEnabled); err != nil {
+		return Config{}, err
+	}
+	if cfg.Analysis.SemanticMergeEnabled, err = envBool(lookup, envNames("MEMORY_SEMANTIC_MERGE_ENABLED"), cfg.Analysis.SemanticMergeEnabled); err != nil {
+		return Config{}, err
+	}
+	if cfg.Analysis.SemanticDedupeLexicalFallback, err = envBool(lookup, envNames("MEMORY_SEMANTIC_DEDUPE_LEXICAL_FALLBACK"), cfg.Analysis.SemanticDedupeLexicalFallback); err != nil {
+		return Config{}, err
+	}
+	if cfg.Analysis.SemanticSimilarityThreshold, err = envFloat(lookup, envNames("MEMORY_SEMANTIC_SIMILARITY_THRESHOLD"), cfg.Analysis.SemanticSimilarityThreshold); err != nil {
 		return Config{}, err
 	}
 	cfg.Scheduler.Adapter = envString(lookup, envNames("MEMORY_SCHEDULER_ADAPTER"), cfg.Scheduler.Adapter)
@@ -313,6 +341,9 @@ func (c Config) Validate() error {
 	if c.Analysis.MaxTokens <= 0 || c.Analysis.MaintenanceBatchSize <= 0 {
 		return errors.New("MEMORY_ANALYSIS_MAX_TOKENS and MEMORY_MAINTENANCE_BATCH_SIZE must be positive")
 	}
+	if c.Analysis.SemanticSimilarityThreshold <= 0 || c.Analysis.SemanticSimilarityThreshold >= 1 {
+		return errors.New("MEMORY_SEMANTIC_SIMILARITY_THRESHOLD must be between 0 and 1 (exclusive)")
+	}
 	if c.Scheduler.Adapter != "internal" && c.Scheduler.Adapter != "none" {
 		return fmt.Errorf("unsupported MEMORY_SCHEDULER_ADAPTER %q", c.Scheduler.Adapter)
 	}
@@ -336,38 +367,42 @@ func (c Config) Validate() error {
 // consistency test that keeps deployment manifests and docs aligned.
 func EnvNames() map[string][]string {
 	return map[string][]string{
-		"app_env":                   envNames("MEMORY_APP_ENV", "APP_ENV"),
-		"http_addr":                 envNames("MEMORY_HTTP_ADDR", "HTTP_ADDR"),
-		"http_request_timeout":      envNames("MEMORY_HTTP_REQUEST_TIMEOUT", "HTTP_REQUEST_TIMEOUT"),
-		"database_url":              envNames("MEMORY_DATABASE_URL", "DATABASE_URL"),
-		"migrate_on_start":          envNames("MEMORY_MIGRATE_ON_START"),
-		"auth_session_ttl":          envNames("MEMORY_AUTH_SESSION_TTL", "AUTH_SESSION_TTL"),
-		"auth_cookie_secure":        envNames("MEMORY_AUTH_COOKIE_SECURE", "AUTH_COOKIE_SECURE"),
-		"llm_enabled":               envNames("MEMORY_LLM_ENABLED"),
-		"llm_base_url":              envNames("MEMORY_LLM_BASE_URL"),
-		"llm_model":                 envNames("MEMORY_LLM_MODEL"),
-		"llm_api_key":               envNames("MEMORY_LLM_API_KEY"),
-		"llm_timeout":               envNames("MEMORY_LLM_TIMEOUT"),
-		"llm_max_attempts":          envNames("MEMORY_LLM_MAX_ATTEMPTS"),
-		"analysis_max_tokens":       envNames("MEMORY_ANALYSIS_MAX_TOKENS"),
-		"maintenance_batch_size":    envNames("MEMORY_MAINTENANCE_BATCH_SIZE"),
-		"scheduler_adapter":         envNames("MEMORY_SCHEDULER_ADAPTER"),
-		"schedule_default_interval": envNames("MEMORY_SCHEDULE_DEFAULT_INTERVAL"),
-		"session_retention":         envNames("MEMORY_SESSION_RETENTION", "SESSION_RETENTION"),
-		"config_master_key":         envNames("MEMORY_CONFIG_MASTER_KEY"),
-		"embedding_enabled":         envNames("MEMORY_EMBEDDING_ENABLED", "EMBEDDING_ENABLED"),
-		"embedding_artifact":        envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"),
-		"embedding_binary":          envNames("MEMORY_EMBEDDING_BINARY", "EMBEDDING_BINARY"),
-		"embedding_pooling":         envNames("MEMORY_EMBEDDING_POOLING", "EMBEDDING_POOLING"),
-		"embedding_query_prefix":    envNames("MEMORY_EMBEDDING_QUERY_PREFIX", "EMBEDDING_QUERY_PREFIX"),
-		"embedding_document_prefix": envNames("MEMORY_EMBEDDING_DOCUMENT_PREFIX", "EMBEDDING_DOCUMENT_PREFIX"),
-		"reranker_enabled":          envNames("MEMORY_RERANKER_ENABLED", "RERANKER_ENABLED"),
-		"reranker_base_url":         envNames("MEMORY_RERANKER_BASE_URL", "RERANKER_BASE_URL"),
-		"reranker_model":            envNames("MEMORY_RERANKER_MODEL", "RERANKER_MODEL"),
-		"reranker_api_key":          envNames("MEMORY_RERANKER_API_KEY", "RERANKER_API_KEY"),
-		"queue_adapter":             envNames("MEMORY_QUEUE_ADAPTER", "MQ_ADAPTER"),
-		"max_request_bytes":         envNames("MEMORY_MAX_REQUEST_BYTES", "MAX_REQUEST_BYTES"),
-		"external_llm_analysis":     envNames("MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS", "ALLOW_EXTERNAL_LLM_ANALYSIS"),
+		"app_env":                          envNames("MEMORY_APP_ENV", "APP_ENV"),
+		"http_addr":                        envNames("MEMORY_HTTP_ADDR", "HTTP_ADDR"),
+		"http_request_timeout":             envNames("MEMORY_HTTP_REQUEST_TIMEOUT", "HTTP_REQUEST_TIMEOUT"),
+		"database_url":                     envNames("MEMORY_DATABASE_URL", "DATABASE_URL"),
+		"migrate_on_start":                 envNames("MEMORY_MIGRATE_ON_START"),
+		"auth_session_ttl":                 envNames("MEMORY_AUTH_SESSION_TTL", "AUTH_SESSION_TTL"),
+		"auth_cookie_secure":               envNames("MEMORY_AUTH_COOKIE_SECURE", "AUTH_COOKIE_SECURE"),
+		"llm_enabled":                      envNames("MEMORY_LLM_ENABLED"),
+		"llm_base_url":                     envNames("MEMORY_LLM_BASE_URL"),
+		"llm_model":                        envNames("MEMORY_LLM_MODEL"),
+		"llm_api_key":                      envNames("MEMORY_LLM_API_KEY"),
+		"llm_timeout":                      envNames("MEMORY_LLM_TIMEOUT"),
+		"llm_max_attempts":                 envNames("MEMORY_LLM_MAX_ATTEMPTS"),
+		"analysis_max_tokens":              envNames("MEMORY_ANALYSIS_MAX_TOKENS"),
+		"maintenance_batch_size":           envNames("MEMORY_MAINTENANCE_BATCH_SIZE"),
+		"semantic_dedupe_enabled":          envNames("MEMORY_SEMANTIC_DEDUPE_ENABLED"),
+		"semantic_merge_enabled":           envNames("MEMORY_SEMANTIC_MERGE_ENABLED"),
+		"semantic_similarity_threshold":    envNames("MEMORY_SEMANTIC_SIMILARITY_THRESHOLD"),
+		"semantic_dedupe_lexical_fallback": envNames("MEMORY_SEMANTIC_DEDUPE_LEXICAL_FALLBACK"),
+		"scheduler_adapter":                envNames("MEMORY_SCHEDULER_ADAPTER"),
+		"schedule_default_interval":        envNames("MEMORY_SCHEDULE_DEFAULT_INTERVAL"),
+		"session_retention":                envNames("MEMORY_SESSION_RETENTION", "SESSION_RETENTION"),
+		"config_master_key":                envNames("MEMORY_CONFIG_MASTER_KEY"),
+		"embedding_enabled":                envNames("MEMORY_EMBEDDING_ENABLED", "EMBEDDING_ENABLED"),
+		"embedding_artifact":               envNames("MEMORY_EMBEDDING_ARTIFACT", "EMBEDDING_ARTIFACT"),
+		"embedding_binary":                 envNames("MEMORY_EMBEDDING_BINARY", "EMBEDDING_BINARY"),
+		"embedding_pooling":                envNames("MEMORY_EMBEDDING_POOLING", "EMBEDDING_POOLING"),
+		"embedding_query_prefix":           envNames("MEMORY_EMBEDDING_QUERY_PREFIX", "EMBEDDING_QUERY_PREFIX"),
+		"embedding_document_prefix":        envNames("MEMORY_EMBEDDING_DOCUMENT_PREFIX", "EMBEDDING_DOCUMENT_PREFIX"),
+		"reranker_enabled":                 envNames("MEMORY_RERANKER_ENABLED", "RERANKER_ENABLED"),
+		"reranker_base_url":                envNames("MEMORY_RERANKER_BASE_URL", "RERANKER_BASE_URL"),
+		"reranker_model":                   envNames("MEMORY_RERANKER_MODEL", "RERANKER_MODEL"),
+		"reranker_api_key":                 envNames("MEMORY_RERANKER_API_KEY", "RERANKER_API_KEY"),
+		"queue_adapter":                    envNames("MEMORY_QUEUE_ADAPTER", "MQ_ADAPTER"),
+		"max_request_bytes":                envNames("MEMORY_MAX_REQUEST_BYTES", "MAX_REQUEST_BYTES"),
+		"external_llm_analysis":            envNames("MEMORY_ALLOW_EXTERNAL_LLM_ANALYSIS", "ALLOW_EXTERNAL_LLM_ANALYSIS"),
 	}
 }
 
@@ -417,6 +452,18 @@ func envInt64(lookup LookupEnv, keys []string, fallback int64) (int64, error) {
 		return fallback, nil
 	}
 	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", keys[0], err)
+	}
+	return parsed, nil
+}
+
+func envFloat(lookup LookupEnv, keys []string, fallback float64) (float64, error) {
+	value, ok := lookupFirst(lookup, keys)
+	if !ok {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", keys[0], err)
 	}

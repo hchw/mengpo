@@ -78,7 +78,7 @@ func (r *NormalizedEventRepository) ListPendingAnalysisEvents(ctx context.Contex
 	var result []ports.PendingAnalysisEvent
 	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-SELECT ne.id::text, ne.raw_event_id::text, COALESCE(oe.session_id::text, ''), oe.occurred_at, ne.normalized_payload, ne.sequence, COALESCE(oe.attribution_level, 'unknown')
+SELECT ne.id::text, ne.raw_event_id::text, COALESCE(oe.user_id::text, ''), COALESCE(oe.session_id::text, ''), oe.occurred_at, ne.normalized_payload, ne.sequence, COALESCE(oe.attribution_level, 'unknown')
 FROM normalized_events ne
 JOIN observed_events oe ON oe.id = ne.raw_event_id
 ORDER BY ne.created_at, ne.id
@@ -91,7 +91,7 @@ OFFSET $1 LIMIT $2`, offset, limit)
 			var item ports.PendingAnalysisEvent
 			var sequence sql.NullInt64
 			var payload []byte
-			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.SessionID, &item.OccurredAt, &payload, &sequence, &item.Attribution); err != nil {
+			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.UserID, &item.SessionID, &item.OccurredAt, &payload, &sequence, &item.Attribution); err != nil {
 				return err
 			}
 			item.Payload = json.RawMessage(payload)
@@ -115,7 +115,7 @@ func (r *NormalizedEventRepository) LoadAnalysisEventsByRawIDs(ctx context.Conte
 	var result []ports.PendingAnalysisEvent
 	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-SELECT ne.id::text, ne.raw_event_id::text, COALESCE(oe.session_id::text, ''), oe.occurred_at, ne.normalized_payload, ne.sequence, COALESCE(oe.attribution_level, 'unknown')
+SELECT ne.id::text, ne.raw_event_id::text, COALESCE(oe.user_id::text, ''), COALESCE(oe.session_id::text, ''), oe.occurred_at, ne.normalized_payload, ne.sequence, COALESCE(oe.attribution_level, 'unknown')
 FROM normalized_events ne
 JOIN observed_events oe ON oe.id = ne.raw_event_id
 WHERE ne.raw_event_id = ANY($1::uuid[])`, uuidArrayLiteral(rawEventIDs))
@@ -127,7 +127,7 @@ WHERE ne.raw_event_id = ANY($1::uuid[])`, uuidArrayLiteral(rawEventIDs))
 			var item ports.PendingAnalysisEvent
 			var sequence sql.NullInt64
 			var payload []byte
-			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.SessionID, &item.OccurredAt, &payload, &sequence, &item.Attribution); err != nil {
+			if err := rows.Scan(&item.NormalizedID, &item.RawEventID, &item.UserID, &item.SessionID, &item.OccurredAt, &payload, &sequence, &item.Attribution); err != nil {
 				return err
 			}
 			item.Payload = json.RawMessage(payload)

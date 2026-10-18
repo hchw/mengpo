@@ -21,6 +21,7 @@ import (
 type TriageJob struct {
 	PlanName      string
 	Reader        ports.RecentCandidateReader
+	Neighbors     ports.SemanticNeighborReader
 	Evidence      ports.MemoryEvidenceReader
 	Events        ports.NormalizedEventReader
 	Candidates    ports.CandidateMemoryWriter
@@ -31,6 +32,7 @@ type TriageJob struct {
 	PromptVersion string
 	SchemaVersion string
 	BatchSize     int
+	Threshold     float64
 	NewID         func() (string, error)
 	Clock         func() time.Time
 }
@@ -80,11 +82,13 @@ func (j *TriageJob) Run(ctx context.Context, tenantID string) error {
 
 func (j *TriageJob) triageOwner(ctx context.Context, tenantID, owner string, nodes []ports.MemoryNodeRecord, now time.Time) (int, error) {
 	correlation := correlationID(j.PlanName+":"+owner, tenantID, now)
-	// Deterministic duplicate grouping always runs, even without a model.
-	groupByNode := make(map[string]string, len(nodes))
-	for _, node := range nodes {
-		groupByNode[node.ID] = duplicateKey(node)
+	// Duplicate grouping always runs, even without a model: byte-identical
+	// content plus semantic near-duplicate edges when embeddings are available.
+	adjacency, err := semanticAdjacency(ctx, j.Neighbors, tenantID, nodes, j.Threshold)
+	if err != nil {
+		return 0, err
 	}
+	groupByNode := groupDuplicates(nodes, adjacency)
 	eventByID := map[string]ports.PendingAnalysisEvent{}
 	nodeByEvent := map[string]string{}
 	candidates := make([]ports.CandidateMemory, 0, len(nodes))
@@ -125,7 +129,7 @@ func (j *TriageJob) triageOwner(ctx context.Context, tenantID, owner string, nod
 	for _, event := range loaded {
 		eventByID[event.RawEventID] = event
 		events = append(events, ports.AnalysisEvent{
-			EventID: event.RawEventID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, Payload: event.Payload,
+			EventID: event.RawEventID, UserID: event.UserID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, Payload: event.Payload,
 		})
 	}
 	for _, node := range nodes {

@@ -174,6 +174,10 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 			return nil, err
 		}
 		memoryRepository := postgres.NewMemoryRepository(router)
+		var semanticNeighbors ports.SemanticNeighborReader
+		if cfg.Analysis.SemanticDedupeEnabled {
+			semanticNeighbors = postgres.NewSemanticNeighborRepository(router)
+		}
 		contentTextBackfill := &maintenance.ContentTextBackfillJob{
 			PlanName:   "content-text-backfill",
 			Store:      memoryRepository,
@@ -183,7 +187,10 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		if err := schedulerComponent.Register(contentTextBackfill, ports.Schedule{Name: contentTextBackfill.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
 			return nil, err
 		}
-		dedupe := &maintenance.DedupeJob{PlanName: "dedupe", Reader: memoryRepository, Runs: runsRepository, BatchSize: cfg.Analysis.MaintenanceBatchSize}
+		dedupe := &maintenance.DedupeJob{
+			PlanName: "dedupe", Reader: memoryRepository, Runs: runsRepository, BatchSize: cfg.Analysis.MaintenanceBatchSize,
+			Neighbors: semanticNeighbors, Threshold: cfg.Analysis.SemanticSimilarityThreshold,
+		}
 		if err := schedulerComponent.Register(dedupe, ports.Schedule{Name: dedupe.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
 			return nil, err
 		}
@@ -210,6 +217,7 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 		triage := &maintenance.TriageJob{
 			PlanName:      "triage",
 			Reader:        memoryRepository,
+			Neighbors:     semanticNeighbors,
 			Evidence:      candidateRepository,
 			Events:        postgres.NewNormalizedEventRepository(router),
 			Candidates:    candidateRepository,
@@ -220,9 +228,31 @@ func NewWorker(cfg config.Config, db *sql.DB, embedder ports.Embedder) (*Worker,
 			PromptVersion: promptVersion,
 			SchemaVersion: "schema-v1",
 			BatchSize:     cfg.Analysis.MaintenanceBatchSize,
+			Threshold:     cfg.Analysis.SemanticSimilarityThreshold,
 		}
 		if err := schedulerComponent.Register(triage, ports.Schedule{Name: triage.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
 			return nil, err
+		}
+		if cfg.Analysis.SemanticDedupeEnabled {
+			nearDuplicate := &maintenance.NearDuplicateJob{
+				PlanName:        "near-duplicate",
+				Reader:          memoryRepository,
+				Neighbors:       semanticNeighbors,
+				Triage:          triageRepository,
+				Evidence:        candidateRepository,
+				Merge:           memoryRepository,
+				Confirmer:       dispatcher.Analysis,
+				Runs:            runsRepository,
+				PromptVersion:   promptVersion,
+				SchemaVersion:   "schema-v1",
+				BatchSize:       cfg.Analysis.MaintenanceBatchSize,
+				Threshold:       cfg.Analysis.SemanticSimilarityThreshold,
+				MergeEnabled:    cfg.Analysis.SemanticMergeEnabled,
+				LexicalFallback: cfg.Analysis.SemanticDedupeLexicalFallback,
+			}
+			if err := schedulerComponent.Register(nearDuplicate, ports.Schedule{Name: nearDuplicate.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {
+				return nil, err
+			}
 		}
 		cleanup := &maintenance.CleanupJob{PlanName: "cleanup", Outbox: postgres.NewOutboxRepository(router), Runs: runsRepository}
 		if err := schedulerComponent.Register(cleanup, ports.Schedule{Name: cleanup.Name(), Cadence: cfg.Scheduler.DefaultInterval, Enabled: true}); err != nil {

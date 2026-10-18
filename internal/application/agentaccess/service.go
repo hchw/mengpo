@@ -225,6 +225,7 @@ func (s *Service) Observe(ctx context.Context, envelope dto.Envelope) (any, erro
 	input := observation.Input{
 		SourceEventID:  payload.SourceEventID,
 		IdempotencyKey: scoped.IdempotencyKey,
+		UserID:         scoped.UserID,
 		SessionID:      scoped.SessionID,
 		ConversationID: payload.ConversationID,
 		MessageType:    strings.TrimSpace(payload.MessageType),

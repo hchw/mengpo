@@ -149,6 +149,7 @@ export const dictionaries = {
     'review.proposedBy': 'proposed by',
     'review.evidence': 'evidence',
     'review.triage': 'triage',
+    'review.duplicate': 'suspected duplicate',
     'review.conflicts': 'conflicts',
 
     // Projection debugger
@@ -436,6 +437,7 @@ export const dictionaries = {
     'review.proposedBy': '提出者',
     'review.evidence': '证据',
     'review.triage': '分诊',
+    'review.duplicate': '疑似重复',
     'review.conflicts': '冲突',
 
     'debugger.title': '投影调试',

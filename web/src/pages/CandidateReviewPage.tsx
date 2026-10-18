@@ -102,9 +102,14 @@ export function CandidateReviewPage({ api }: CandidateReviewPageProps) {
                 {t('review.evidence')}: {candidate.evidence_ids.length}
               </span>
             ) : null}
-            {candidate.triage_group || candidate.triage_rationale ? (
+            {candidate.triage_group ? (
+              <span data-testid={`candidate-duplicate-${candidate.id}`}>
+                {t('review.duplicate')}: {candidate.triage_group}
+              </span>
+            ) : null}
+            {candidate.triage_rationale ? (
               <span data-testid={`candidate-triage-${candidate.id}`}>
-                {t('review.triage')}: {candidate.triage_rationale || candidate.triage_group}
+                {t('review.triage')}: {candidate.triage_rationale}
               </span>
             ) : null}
             {candidate.triage_conflicts && candidate.triage_conflicts.length > 0 ? (

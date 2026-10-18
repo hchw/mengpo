@@ -39,6 +39,7 @@ type Event struct {
 	SourceEventID  string          `json:"source_event_id,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	TenantID       string          `json:"tenant_id"`
+	UserID         string          `json:"user_id,omitempty"`
 	SessionID      string          `json:"session_id,omitempty"`
 	ConversationID string          `json:"conversation_id,omitempty"`
 	SourceType     SourceType      `json:"source_type"`
@@ -58,6 +59,28 @@ type Event struct {
 }
 
 var ErrInvalidEvent = errors.New("invalid observation event")
+
+// isUUID reports whether value is a canonical 8-4-4-4-12 UUID. The owner is
+// optional, so an empty value is accepted by Validate; a non-empty one must be
+// well formed before it reaches a uuid-typed column.
+func isUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 func (e Event) Validate() error {
 	if strings.TrimSpace(e.ID) == "" || strings.TrimSpace(e.TenantID) == "" ||
@@ -81,6 +104,9 @@ func (e Event) Validate() error {
 		return ErrInvalidEvent
 	}
 	if e.AccessLevel != "" && e.AccessLevel != Level0 && e.AccessLevel != Level1 && e.AccessLevel != Level2 {
+		return ErrInvalidEvent
+	}
+	if e.UserID != "" && !isUUID(e.UserID) {
 		return ErrInvalidEvent
 	}
 	if len(e.Payload) > 0 && !json.Valid(e.Payload) {

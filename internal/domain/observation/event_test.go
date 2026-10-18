@@ -20,6 +20,23 @@ func TestEventValidateAcceptsCompleteObservation(t *testing.T) {
 	}
 }
 
+// TestEventValidateTreatsOwnerAsOptional pins that the ownership anchor is
+// optional (historical events have none) but must be well formed when set.
+func TestEventValidateTreatsOwnerAsOptional(t *testing.T) {
+	withoutOwner := validEvent()
+	if withoutOwner.UserID != "" {
+		t.Fatal("precondition: event should have no owner")
+	}
+	if err := withoutOwner.Validate(); err != nil {
+		t.Fatalf("empty owner must be accepted, got %v", err)
+	}
+	withOwner := validEvent()
+	withOwner.UserID = "11111111-1111-4111-8111-111111111111"
+	if err := withOwner.Validate(); err != nil {
+		t.Fatalf("valid owner must be accepted, got %v", err)
+	}
+}
+
 func TestEventValidateRejectsInvalidFields(t *testing.T) {
 	tests := map[string]func(*Event){
 		"missing source":      func(e *Event) { e.SourceType = "unknown" },
@@ -28,6 +45,7 @@ func TestEventValidateRejectsInvalidFields(t *testing.T) {
 		"invalid payload":     func(e *Event) { e.Payload = json.RawMessage(`{`) },
 		"negative sequence":   func(e *Event) { n := int64(-1); e.Sequence = &n },
 		"missing idempotency": func(e *Event) { e.IdempotencyKey = " " },
+		"invalid owner":       func(e *Event) { e.UserID = "not-a-uuid" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

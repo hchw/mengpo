@@ -843,3 +843,125 @@ func TestPrimaryFailureDegradesWithoutLosingNormalization(t *testing.T) {
 		t.Fatal("degraded rule fallback produced candidates")
 	}
 }
+
+const (
+	ownerEventID   = "00000000-0000-4000-8000-0000000000c1"
+	ownerSessionID = "00000000-0000-4000-8000-0000000000c2"
+)
+
+func gatedFailureEvent(eventID, userID, sessionID string) observation.Event {
+	return observation.Event{
+		ID: eventID, TenantID: "tenant-a", UserID: userID, SessionID: sessionID,
+		SourceType: observation.SourceUser, MessageType: "message",
+		Payload: json.RawMessage(`{"status":"error","text":"migration failed"}`), OccurredAt: time.Now().UTC(),
+		Attribution: observation.Attribution{Level: observation.AttributionDirect},
+	}
+}
+
+func userGlobalAnalyst(evidenceID, scopeID string) *countingAnalyst {
+	return &countingAnalyst{result: ports.AnalystResult{Candidates: []ports.CandidateMemory{{
+		CandidateID: "c1", EvidenceEventIDs: []string{evidenceID}, ScopeType: "user-global", ScopeID: scopeID,
+		Content: json.RawMessage(`{"text":"x"}`), Confidence: 0.6,
+	}}}}
+}
+
+// TestCandidateOwnerPrefersEventOverSession pins that a user-global candidate is
+// scoped to the observation's own owner, not the bound session's owner.
+func TestCandidateOwnerPrefersEventOverSession(t *testing.T) {
+	event := gatedFailureEvent(ownerEventID, ownerEventID, ownerSessionID)
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, event, userGlobalAnalyst(event.ID, ownerSessionID), candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.SessionOwner = fakeSessionOwner{owner: ownerSessionID}
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{ID: "job-owner-1", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(candidates.records) != 1 {
+		t.Fatalf("candidates = %d, want 1", len(candidates.records))
+	}
+	if got := candidates.records[0].Node.UserID; got != ownerEventID {
+		t.Fatalf("owner = %q, want the event owner %q", got, ownerEventID)
+	}
+}
+
+// TestCandidateOwnerFallsBackToSession pins backward compatibility for events
+// that predate the owner anchor.
+func TestCandidateOwnerFallsBackToSession(t *testing.T) {
+	event := gatedFailureEvent(ownerEventID, "", ownerSessionID)
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, event, userGlobalAnalyst(event.ID, ownerSessionID), candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.SessionOwner = fakeSessionOwner{owner: "00000000-0000-4000-8000-0000000000c9"}
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{ID: "job-owner-2", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(candidates.records) != 1 || candidates.records[0].Node.UserID != "00000000-0000-4000-8000-0000000000c9" {
+		t.Fatalf("fallback records = %#v", candidates.records)
+	}
+}
+
+// TestCandidateWithoutOwnerIsNotWritten pins the safe default: no owner and no
+// session means no scoped memory.
+func TestCandidateWithoutOwnerIsNotWritten(t *testing.T) {
+	event := gatedFailureEvent(ownerEventID, "", "")
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, event, userGlobalAnalyst(event.ID, "user-1"), candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{ID: "job-owner-3", TenantID: "tenant-a", JobType: JobNormalizeEvent, AggregateID: event.ID}); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if len(candidates.records) != 0 {
+		t.Fatalf("unowned candidate was written: %#v", candidates.records)
+	}
+}
+
+func consolidationEvents(userID, sessionID string) []ports.PendingAnalysisEvent {
+	return []ports.PendingAnalysisEvent{{
+		NormalizedID: "n-a", RawEventID: "raw-a", UserID: userID, SessionID: sessionID,
+		OccurredAt: time.Now().UTC(), Payload: json.RawMessage(`{"text":"a"}`),
+	}}
+}
+
+// TestConsolidationOwnerPrefersEventOverSession pins the periodic path to the
+// same event-owner-first rule as the single-event path.
+func TestConsolidationOwnerPrefersEventOverSession(t *testing.T) {
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, observation.Event{}, userGlobalAnalyst("raw-a", ownerSessionID), candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.AnalysisReader = fakeAnalysisReader{events: consolidationEvents(ownerEventID, ownerSessionID)}
+	dispatcher.SessionOwner = fakeSessionOwner{owner: ownerSessionID}
+	payload, _ := json.Marshal(map[string]any{"raw_event_ids": []string{"raw-a"}})
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{ID: "job-consolidate-owner-1", TenantID: "tenant-a", JobType: JobConsolidate, Payload: payload}); err != nil {
+		t.Fatalf("Handle(consolidate) error = %v", err)
+	}
+	if len(candidates.records) != 1 || candidates.records[0].Node.UserID != ownerEventID {
+		t.Fatalf("consolidated records = %#v", candidates.records)
+	}
+}
+
+// TestConsolidationOwnerFallsBackToSession pins backward compatibility on the
+// periodic path.
+func TestConsolidationOwnerFallsBackToSession(t *testing.T) {
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, observation.Event{}, userGlobalAnalyst("raw-a", ownerSessionID), candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.AnalysisReader = fakeAnalysisReader{events: consolidationEvents("", ownerSessionID)}
+	dispatcher.SessionOwner = fakeSessionOwner{owner: ownerEventID}
+	payload, _ := json.Marshal(map[string]any{"raw_event_ids": []string{"raw-a"}})
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{ID: "job-consolidate-owner-2", TenantID: "tenant-a", JobType: JobConsolidate, Payload: payload}); err != nil {
+		t.Fatalf("Handle(consolidate) error = %v", err)
+	}
+	if len(candidates.records) != 1 || candidates.records[0].Node.UserID != ownerEventID {
+		t.Fatalf("consolidated fallback records = %#v", candidates.records)
+	}
+}
+
+// TestConsolidationWithoutOwnerIsNotWritten pins the safe default on the
+// periodic path.
+func TestConsolidationWithoutOwnerIsNotWritten(t *testing.T) {
+	candidates := &fakeCandidateWriter{}
+	dispatcher := dispatcherFor(t, observation.Event{}, userGlobalAnalyst("raw-a", "user-1"), candidates, &fakeNormalizedStore{}, &fakeRunStore{})
+	dispatcher.AnalysisReader = fakeAnalysisReader{events: consolidationEvents("", "")}
+	payload, _ := json.Marshal(map[string]any{"raw_event_ids": []string{"raw-a"}})
+	if err := dispatcher.Handle(context.Background(), ports.OutboxJob{ID: "job-consolidate-owner-3", TenantID: "tenant-a", JobType: JobConsolidate, Payload: payload}); err != nil {
+		t.Fatalf("Handle(consolidate) error = %v", err)
+	}
+	if len(candidates.records) != 0 {
+		t.Fatalf("unowned consolidated candidate was written: %#v", candidates.records)
+	}
+}

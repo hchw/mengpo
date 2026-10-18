@@ -19,7 +19,7 @@ func (r *recordingStore) StoreObservation(_ context.Context, event obsdomain.Eve
 }
 
 func TestLevel0DeploymentCredentialResolvesTenantAndIngests(t *testing.T) {
-	identity, err := ResolveDeployment(DeploymentConfig{TenantID: "tenant-deploy", ServiceID: "svc-1", AllowedScopes: []string{"session"}}, RequestContext{UserID: "user-1", SessionID: "session-1", ScopeType: "session"})
+	identity, err := ResolveDeployment(DeploymentConfig{TenantID: "tenant-deploy", ServiceID: "svc-1", AllowedScopes: []string{"session"}}, RequestContext{UserID: "00000000-0000-4000-8000-0000000000a1", SessionID: "00000000-0000-4000-8000-0000000000b1", ScopeType: "session"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestLevel0DeploymentCredentialResolvesTenantAndIngests(t *testing.T) {
 	gateway := observation.NewGateway(store)
 	ctx := WithIdentity(context.Background(), identity)
 	service := NewService(ServiceOptions{Gateway: gateway})
-	env := envelope(dto.Scope{TenantID: "tenant-deploy", UserID: "user-1", Type: "session", SessionID: "session-1"}, dto.Principal{Type: "user", ID: "user-1"}, `{"text":"hello","payload":{"k":"v"}}`)
+	env := envelope(dto.Scope{TenantID: "tenant-deploy", UserID: "00000000-0000-4000-8000-0000000000a1", Type: "session", SessionID: "00000000-0000-4000-8000-0000000000b1"}, dto.Principal{Type: "user", ID: "00000000-0000-4000-8000-0000000000a1"}, `{"text":"hello","payload":{"k":"v"}}`)
 	if _, err := service.Observe(ctx, env); err != nil {
 		t.Fatalf("level 0 observe: %v", err)
 	}

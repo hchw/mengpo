@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/hchw/mengpo/internal/domain/observation"
 	"github.com/hchw/mengpo/internal/ports"
 )
 
@@ -79,4 +80,24 @@ func (s *Service) Analyze(ctx context.Context, batch ports.AnalysisBatch) (ports
 		return ports.AnalystResult{}, err
 	}
 	return result, nil
+}
+
+// ConfirmSameFact asks the Memory LLM whether two memories state the same fact.
+// It is fail-closed: a nil service, a provider error, or any answer that is not
+// an explicit positive returns false, so an unconfirmed pair is never merged.
+func (s *Service) ConfirmSameFact(ctx context.Context, batch ports.AnalysisBatch) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	batch.TaskType = observation.TaskConfirmDuplicate
+	result, err := s.Analyze(ctx, batch)
+	if err != nil {
+		return false, err
+	}
+	for _, conflict := range result.Conflicts {
+		if len(conflict.CandidateIDs) == 2 && conflict.SameFact && !conflict.Conflicted {
+			return true, nil
+		}
+	}
+	return false, nil
 }

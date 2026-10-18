@@ -67,6 +67,26 @@ func TestGatewayAdaptsAllObservationSources(t *testing.T) {
 	}
 }
 
+func TestGatewayCarriesOwnerIntoEvent(t *testing.T) {
+	repo := &memoryRepository{}
+	gateway := NewGateway(repo)
+	gateway.newID = func() (string, error) { return "00000000-0000-4000-8000-000000000001", nil }
+	input := Input{IdempotencyKey: "key", UserID: "11111111-1111-4111-8111-111111111111", ConversationID: "conversation", MessageType: "message",
+		Payload: json.RawMessage(`{"ok":true}`), OccurredAt: time.Now(), Visibility: observation.VisibilitySession,
+		Reliability: observation.ReliabilityHigh, RetentionClass: "standard"}
+	p := Principal{TenantID: "trusted-tenant", SourceID: "trusted-source", SourceType: observation.SourceAgent, AccessLevel: observation.Level1, AgentBound: true}
+	event, created, err := gateway.Ingest(context.Background(), p, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || event.UserID != input.UserID {
+		t.Fatalf("event owner = %q (created=%v), want %q", event.UserID, created, input.UserID)
+	}
+	if len(repo.events) != 1 || repo.events[0].UserID != input.UserID {
+		t.Fatalf("persisted owner = %#v, want %q", repo.events, input.UserID)
+	}
+}
+
 func TestGatewayPreservesRawEventWhenNotificationFails(t *testing.T) {
 	repo := &memoryRepository{}
 	notifier := &notificationRecorder{err: errors.New("NATS unavailable")}

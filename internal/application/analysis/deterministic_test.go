@@ -75,15 +75,36 @@ func TestDeterministicCandidateReadsNormalizedPayloadText(t *testing.T) {
 	}
 }
 
+func TestDeterministicCandidateCapturesSessionlessRemember(t *testing.T) {
+	event := ports.AnalysisEvent{
+		EventID:     "e1",
+		UserID:      "00000000-0000-4000-8000-0000000000f1",
+		SessionID:   "",
+		MessageType: "user_remember",
+		OccurredAt:  time.Now().UTC(),
+		Payload:     json.RawMessage(`{"remember":true,"text":"always set GOPROXY"}`),
+	}
+	candidate, ok := DeterministicCandidate(event)
+	if !ok {
+		t.Fatal("a sessionless explicit remember must still be captured")
+	}
+	if candidate.ScopeType != "user-global" {
+		t.Fatalf("remember scope = %q, want user-global", candidate.ScopeType)
+	}
+	if candidate.ScopeID != event.UserID {
+		t.Fatalf("remember scope id = %q, want the event owner %q", candidate.ScopeID, event.UserID)
+	}
+}
+
 func TestDeterministicCandidateSkipsUnqualifiedEvents(t *testing.T) {
 	cases := []struct {
 		name  string
 		event ports.AnalysisEvent
 	}{
-		{name: "no session", event: ports.AnalysisEvent{EventID: "e1", MessageType: "user_remember", Payload: json.RawMessage(`{"remember":true,"text":"x"}`)}},
 		{name: "no text", event: ports.AnalysisEvent{EventID: "e2", SessionID: "s", MessageType: "user_remember", Payload: json.RawMessage(`{"remember":true}`)}},
 		{name: "ordinary", event: ports.AnalysisEvent{EventID: "e3", SessionID: "s", MessageType: "turn.outcome", Payload: json.RawMessage(`{"text":"just chatting"}`)}},
-		{name: "empty boundary summary", event: ports.AnalysisEvent{EventID: "e4", SessionID: "s", MessageType: "context.compaction", Payload: json.RawMessage(`{"context_summary":true,"summary":"   "}`)}},
+		{name: "sessionless boundary summary", event: ports.AnalysisEvent{EventID: "e4", SessionID: "", MessageType: "context.compaction", Payload: json.RawMessage(`{"context_summary":true,"summary":"session memory needs a session"}`)}},
+		{name: "empty boundary summary", event: ports.AnalysisEvent{EventID: "e5", SessionID: "s", MessageType: "context.compaction", Payload: json.RawMessage(`{"context_summary":true,"summary":"   "}`)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

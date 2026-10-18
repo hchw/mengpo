@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hchw/mengpo/internal/application/agentaccess"
 	"github.com/hchw/mengpo/internal/application/agents"
 	"github.com/hchw/mengpo/internal/domain/auth"
 )
@@ -187,4 +188,41 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestResolveAgentCredentialRequiresExactlyOneBoundUser pins the guarantee that a
+// usable credential has a non-empty owner: the MCP connection path passes no user
+// id, so an agent must be bound to exactly one user.
+func TestResolveAgentCredentialRequiresExactlyOneBoundUser(t *testing.T) {
+	const secret = "secret-1"
+	lookupFor := func(userIDs []string) *fakeAgentRepository {
+		agent := handshakeTestAgent(userIDs, []string{"observe", "session"})
+		return &fakeAgentRepository{
+			agent:      agent,
+			credential: auth.AgentCredential{ID: "cred_agent-1", AgentID: agent.ID, TenantID: agent.TenantID, SecretHash: secretHash(secret)},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		userIDs []string
+	}{
+		{"no bound user", nil},
+		{"multiple bound users", []string{"user-1", "user-2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := resolveAgentCredential(context.Background(), lookupFor(tc.userIDs), secret, ""); !errors.Is(err, ErrUserSelectionRequired) {
+				t.Fatalf("err = %v, want ErrUserSelectionRequired", err)
+			}
+		})
+	}
+	identity, err := resolveAgentCredential(context.Background(), lookupFor([]string{"user-1"}), secret, "")
+	if err != nil {
+		t.Fatalf("sole bound user: %v", err)
+	}
+	if identity.UserID != "user-1" || identity.AgentID != "agent-1" || identity.TenantID != "tenant-1" {
+		t.Fatalf("identity = %#v", identity)
+	}
+	if _, err := resolveAgentCredential(context.Background(), lookupFor([]string{"user-1"}), "wrong-secret", ""); !errors.Is(err, agentaccess.ErrNoIdentity) {
+		t.Fatalf("wrong secret err = %v, want ErrNoIdentity", err)
+	}
 }

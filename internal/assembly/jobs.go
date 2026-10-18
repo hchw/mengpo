@@ -134,7 +134,7 @@ func (d *JobDispatcher) normalizeEvent(ctx context.Context, job ports.OutboxJob)
 			TaskType:      taskType,
 			PromptVersion: promptVersion,
 			SchemaVersion: d.SchemaVersion,
-			Events:        []ports.AnalysisEvent{{EventID: event.ID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, MessageType: event.MessageType, Payload: event.Payload}},
+			Events:        []ports.AnalysisEvent{{EventID: event.ID, UserID: event.UserID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, MessageType: event.MessageType, Payload: event.Payload}},
 		})
 		if err != nil {
 			d.finishRun(ctx, job.TenantID, runID, taskType, time.Since(started), ports.AnalysisRunUpdate{
@@ -266,7 +266,7 @@ func (d *JobDispatcher) consolidate(ctx context.Context, job ports.OutboxJob) er
 	evidenceIDs := make([]string, 0, len(events))
 	sessionID := ""
 	for _, event := range events {
-		batchEvents = append(batchEvents, ports.AnalysisEvent{EventID: event.RawEventID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, Payload: event.Payload})
+		batchEvents = append(batchEvents, ports.AnalysisEvent{EventID: event.RawEventID, UserID: event.UserID, SessionID: event.SessionID, OccurredAt: event.OccurredAt, Payload: event.Payload})
 		evidenceIDs = append(evidenceIDs, event.RawEventID)
 		if sessionID == "" {
 			sessionID = event.SessionID
@@ -338,10 +338,12 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 		return nil
 	}
 	sessionByRawID := make(map[string]string, len(events))
+	userByRawID := make(map[string]string, len(events))
 	attributionByRawID := make(map[string]string, len(events))
 	explicitByRawID := make(map[string]bool, len(events))
 	for _, event := range events {
 		sessionByRawID[event.RawEventID] = event.SessionID
+		userByRawID[event.RawEventID] = event.UserID
 		attributionByRawID[event.RawEventID] = event.Attribution
 		explicitByRawID[event.RawEventID] = isExplicitRemember("", event.Payload)
 	}
@@ -362,11 +364,28 @@ func (d *JobDispatcher) persistCandidatesForEvents(ctx context.Context, job port
 				break
 			}
 		}
-		if sessionID == "" || d.SessionOwner == nil {
+		// Event ownership is authoritative; the session is only a legacy
+		// fallback for observations written before the owner anchor existed.
+		owner := ""
+		for _, evidenceID := range candidate.EvidenceEventIDs {
+			if value, ok := userByRawID[evidenceID]; ok && value != "" {
+				owner = value
+				break
+			}
+		}
+		if owner == "" && sessionID != "" && d.SessionOwner != nil {
+			resolved, err := d.SessionOwner.GetSessionOwner(ctx, job.TenantID, sessionID)
+			if err != nil || resolved == "" {
+				continue
+			}
+			owner = resolved
+		}
+		if owner == "" {
 			continue
 		}
-		owner, err := d.SessionOwner.GetSessionOwner(ctx, job.TenantID, sessionID)
-		if err != nil || owner == "" {
+		// A session-scoped memory needs a session to attach to; a user-global
+		// one does not.
+		if candidate.ScopeType == "session" && sessionID == "" {
 			continue
 		}
 		scopeID := candidate.ScopeID
@@ -530,8 +549,10 @@ func (d *JobDispatcher) persistCandidates(ctx context.Context, job ports.OutboxJ
 	if len(candidates) == 0 || (d.Candidates == nil && d.WorkingMemory == nil) {
 		return nil
 	}
-	userID := ""
-	if event.SessionID != "" && d.SessionOwner != nil {
+	// Event ownership is authoritative; the session is only a legacy fallback
+	// for observations written before the owner anchor existed.
+	userID := event.UserID
+	if userID == "" && event.SessionID != "" && d.SessionOwner != nil {
 		owner, err := d.SessionOwner.GetSessionOwner(ctx, job.TenantID, event.SessionID)
 		if err != nil {
 			return fmt.Errorf("resolve candidate owner: %w", err)
@@ -635,6 +656,7 @@ func (d *JobDispatcher) captureDeterministicCandidate(event observation.Event, r
 	}
 	candidate, ok := analysis.DeterministicCandidate(ports.AnalysisEvent{
 		EventID:     event.ID,
+		UserID:      event.UserID,
 		SessionID:   event.SessionID,
 		OccurredAt:  event.OccurredAt,
 		MessageType: event.MessageType,
@@ -657,6 +679,7 @@ func (d *JobDispatcher) captureSessionBoundarySummary(event observation.Event, r
 	}
 	candidate, ok := analysis.DeterministicCandidate(ports.AnalysisEvent{
 		EventID:     event.ID,
+		UserID:      event.UserID,
 		SessionID:   event.SessionID,
 		OccurredAt:  event.OccurredAt,
 		MessageType: event.MessageType,

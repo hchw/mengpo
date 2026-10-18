@@ -136,6 +136,13 @@ describe('CandidateReviewPage', () => {
     await waitFor(() => expect(screen.getByText('Conflicting change')).toBeInTheDocument());
     expect(screen.getByTestId('candidate-c1')).toBeInTheDocument();
   });
+
+  it('shows the suspected duplicate group', async () => {
+    const api = fakeConsoleApi({ listCandidates: async () => page([candidate('c1', { triage_group: 'group-42' })]) });
+    render(<CandidateReviewPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('candidate-duplicate-c1')).toBeInTheDocument());
+    expect(screen.getByTestId('candidate-duplicate-c1').textContent).toContain('group-42');
+  });
 });
 
 describe('ProjectionDebuggerPage', () => {

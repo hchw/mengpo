@@ -13,11 +13,12 @@ import (
 type TaskType string
 
 const (
-	TaskClassifyEvent   TaskType = "classify_event"
-	TaskAnalyzeFailure  TaskType = "analyze_failure"
-	TaskConsolidate     TaskType = "consolidate_memory"
-	TaskAnalyzeConflict TaskType = "analyze_conflict"
-	TaskProposeTransfer TaskType = "propose_transfer"
+	TaskClassifyEvent    TaskType = "classify_event"
+	TaskAnalyzeFailure   TaskType = "analyze_failure"
+	TaskConsolidate      TaskType = "consolidate_memory"
+	TaskAnalyzeConflict  TaskType = "analyze_conflict"
+	TaskProposeTransfer  TaskType = "propose_transfer"
+	TaskConfirmDuplicate TaskType = "confirm_duplicate"
 )
 
 // PromptVersion is the current version of the prompt contract. It is persisted
@@ -26,7 +27,7 @@ const PromptVersion = "llm-v1"
 
 // AllTaskTypes lists the supported task types in a stable order.
 func AllTaskTypes() []TaskType {
-	return []TaskType{TaskClassifyEvent, TaskAnalyzeFailure, TaskConsolidate, TaskAnalyzeConflict, TaskProposeTransfer}
+	return []TaskType{TaskClassifyEvent, TaskAnalyzeFailure, TaskConsolidate, TaskAnalyzeConflict, TaskProposeTransfer, TaskConfirmDuplicate}
 }
 
 // ParseTaskType normalizes an incoming task type, defaulting to classify_event.
@@ -53,7 +54,7 @@ const outputContract = `Return a single JSON object and nothing else. Use these 
 {"classifications":[{"event_id":"string","category":"string","confidence":0.0}],
  "failures":[{"event_ids":["string"],"conclusion":"string","attribution":"string","confidence":0.0}],
  "candidates":[{"candidate_id":"string","evidence_event_ids":["string"],"scope_type":"session|user-global","scope_id":"string","content":{},"confidence":0.0}],
- "conflicts":[{"candidate_ids":["string"],"conflicted":true,"reason_code":"string"}]}
+ "conflicts":[{"candidate_ids":["string"],"conflicted":true,"reason_code":"string","same_fact":false}]}
 Every evidence id must exist in the input events. Confidence must be between 0 and 1. Never invent evidence ids.`
 
 var taskInstructions = map[TaskType]string{
@@ -62,6 +63,9 @@ var taskInstructions = map[TaskType]string{
 	TaskConsolidate:     "Propose durable memory candidates that are worth remembering long term. Every candidate must cite the events that justify it.",
 	TaskAnalyzeConflict: "Given the candidate memories, report which ones conflict with each other and why.",
 	TaskProposeTransfer: "Propose which memories should be promoted, merged, or expired, with the supporting evidence.",
+	TaskConfirmDuplicate: "Given exactly two candidate memories, decide whether they state the same fact. " +
+		"Return one conflicts entry with both candidate_ids, conflicted=false, same_fact=true only when they mean the same thing; " +
+		"set conflicted=true with a reason_code when they contradict each other.",
 }
 
 // renderPrompt builds the system and user messages for a task type.

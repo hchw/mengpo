@@ -23,8 +23,10 @@ import (
 type DedupeJob struct {
 	PlanName  string
 	Reader    ports.RecentCandidateReader
+	Neighbors ports.SemanticNeighborReader
 	Runs      ports.AnalysisRunStore
 	BatchSize int
+	Threshold float64
 	NewID     func() (string, error)
 	Clock     func() time.Time
 }
@@ -47,8 +49,13 @@ func (j *DedupeJob) Run(ctx context.Context, tenantID string) error {
 		return nil
 	}
 	groups := map[string]struct{}{}
-	for _, node := range candidates {
-		groups[duplicateKey(node)] = struct{}{}
+	adjacency, err := semanticAdjacency(ctx, j.Neighbors, tenantID, candidates, j.Threshold)
+	if err != nil {
+		return err
+	}
+	groupByNode := groupDuplicates(candidates, adjacency)
+	for _, group := range groupByNode {
+		groups[group] = struct{}{}
 	}
 	duplicates := len(candidates) - len(groups)
 	now := j.now()
