@@ -223,7 +223,15 @@ func (h *Handler) remember(identity Identity) sdkmcp.ToolHandlerFor[rememberInpu
 		if strings.TrimSpace(in.Text) == "" {
 			return invalidInput("text is required"), nil, nil
 		}
-		payload := map[string]any{"source_type": "user", "message_type": "user_remember", "text": in.Text}
+		payload := map[string]any{
+			"source_type":  "user",
+			"message_type": "user_remember",
+			"text":         in.Text,
+			// The nested payload is what the server's deterministic capture and
+			// analysis read: the event text and the remember flag must live here,
+			// not only in the top-level text field (which maps to payload_text).
+			"payload": map[string]any{"remember": true, "text": in.Text},
+		}
 		envelope, err := h.envelope(identity, in.UserID, in.SessionID, "", idempotency(in.IdempotencyKey, "remember", in.Text), payload, nil)
 		if err != nil {
 			return toolError(err), nil, nil
@@ -241,7 +249,12 @@ func (h *Handler) forget(identity Identity) sdkmcp.ToolHandlerFor[forgetInput, a
 		if strings.TrimSpace(in.Text) == "" {
 			return invalidInput("text is required"), nil, nil
 		}
-		payload := map[string]any{"source_type": "user", "message_type": "user_forget", "text": in.Text, "forget": true}
+		payload := map[string]any{
+			"source_type":  "user",
+			"message_type": "user_forget",
+			"text":         in.Text,
+			"payload":      map[string]any{"forget": true, "text": in.Text},
+		}
 		envelope, err := h.envelope(identity, in.UserID, "", "user-global", idempotency(in.IdempotencyKey, "forget", in.Text), payload, nil)
 		if err != nil {
 			return toolError(err), nil, nil
@@ -261,11 +274,18 @@ func (h *Handler) observe(identity Identity) sdkmcp.ToolHandlerFor[observeInput,
 			sourceType = "user"
 		}
 		payload := map[string]any{"source_type": sourceType, "message_type": in.MessageType}
+		// Event data travels nested under "payload"; the top-level text is only
+		// the raw payload_text. Keep both in sync so capture/analysis see the text.
+		data := map[string]any{}
 		if in.Text != "" {
 			payload["text"] = in.Text
+			data["text"] = in.Text
 		}
-		if len(in.Payload) > 0 {
-			payload["payload"] = in.Payload
+		for key, value := range in.Payload {
+			data[key] = value
+		}
+		if len(data) > 0 {
+			payload["payload"] = data
 		}
 		envelope, err := h.envelope(identity, in.UserID, in.SessionID, "", idempotency(in.IdempotencyKey, "observe", sourceType, in.MessageType, in.Text, in.SessionID), payload, nil)
 		if err != nil {
