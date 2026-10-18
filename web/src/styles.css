@@ -182,6 +182,10 @@
     animation: rise 0.28s ease both;
   }
 
+  .page-head {
+    @apply flex flex-wrap items-center justify-between gap-3;
+  }
+
   @keyframes rise {
     from {
       opacity: 0;
@@ -562,6 +566,51 @@
   }
   .run-link {
     @apply text-left font-medium text-ink underline decoration-dotted decoration-line underline-offset-4 transition hover:text-brand-300;
+  }
+  .trigger-list {
+    @apply m-0 flex list-none flex-col gap-2 p-0;
+  }
+  .trigger-row {
+    @apply flex items-center justify-between gap-3 rounded-xl border border-line bg-surface-2/40 px-3.5 py-2.5;
+  }
+  .trigger-row__meta {
+    @apply flex min-w-0 flex-col;
+  }
+  .trigger-row__meta small {
+    @apply text-[11px] text-faint;
+  }
+  .trigger-row__done {
+    @apply text-[11px] font-semibold uppercase tracking-wide text-brand-300;
+  }
+  .trigger-actions {
+    @apply flex justify-end;
+  }
+  .duplicate-list {
+    @apply m-0 flex list-none flex-col gap-3 p-0;
+  }
+  .duplicate-member {
+    @apply rounded-xl border border-line bg-surface-2/40 p-3;
+  }
+  .duplicate-member header {
+    @apply mb-1 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-widest text-faint;
+  }
+  .duplicate-member p {
+    @apply m-0 whitespace-pre-wrap break-words text-sm text-ink-soft;
+  }
+  .merge-option {
+    @apply flex cursor-pointer items-start gap-3 text-sm text-ink-soft;
+  }
+  .merge-option input {
+    @apply mt-0.5;
+  }
+  .merge-option span {
+    @apply whitespace-pre-wrap break-words;
+  }
+  .merge-option span:first-of-type {
+    @apply flex-1;
+  }
+  .merge-option span:last-of-type:not(:first-of-type) {
+    @apply shrink-0 text-[11px] text-faint;
   }
 
   /* --------------------------------------------------- session explorer */

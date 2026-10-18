@@ -61,6 +61,7 @@ func (c *ConsoleAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/memories", c.handleMemories)
 	mux.HandleFunc("POST /api/v1/memories/{id}", c.handleMemory)
 	mux.HandleFunc("POST /api/v1/candidates", c.handleCandidates)
+	mux.HandleFunc("POST /api/v1/candidates/duplicates", c.handleCandidateDuplicates)
 	mux.HandleFunc("POST /api/v1/candidates/{id}/{action}", c.handleCandidateAction)
 	mux.HandleFunc("POST /api/v1/failures", c.handleFailures)
 	mux.HandleFunc("POST /api/v1/evaluation", c.handleEvaluation)
@@ -250,6 +251,48 @@ func proposedBy(provenance memoryProvenance) string {
 	default:
 		return ""
 	}
+}
+
+type candidateDuplicatesPayload struct {
+	GroupID string `json:"group_id"`
+}
+
+// handleCandidateDuplicates returns the members of one advisory duplicate group
+// so the review surface can show what a suspected duplicate actually contains
+// instead of just an opaque group id.
+func (c *ConsoleAPI) handleCandidateDuplicates(w http.ResponseWriter, r *http.Request) {
+	envelope, scoped, err := c.bind(r)
+	if err != nil {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	var payload candidateDuplicatesPayload
+	if len(envelope.Payload) > 0 {
+		_ = json.Unmarshal(envelope.Payload, &payload)
+	}
+	if payload.GroupID == "" {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "duplicate group id is required")
+		return
+	}
+	items := make([]map[string]any, 0)
+	if c.Triage != nil {
+		members, err := c.Triage.DuplicateGroupMembers(r.Context(), scoped.TenantID, payload.GroupID)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "READ_FAILED", "unable to read the duplicate group")
+			return
+		}
+		for _, member := range members {
+			items = append(items, map[string]any{
+				"id":         member.MemoryID,
+				"status":     member.Status,
+				"scope_type": member.ScopeType,
+				"confidence": member.Confidence,
+				"content":    member.Content,
+				"created_at": member.CreatedAt.UTC().Format(time.RFC3339),
+			})
+		}
+	}
+	writeAPIData(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (c *ConsoleAPI) handleCandidateAction(w http.ResponseWriter, r *http.Request) {

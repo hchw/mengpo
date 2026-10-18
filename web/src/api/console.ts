@@ -4,6 +4,7 @@ import type {
   AgentRegistration,
   AgentRegistrationInput,
   CandidateRecord,
+  DuplicateGroupMember,
   EvaluationSnapshot,
   FailureRecord,
   Member,
@@ -19,11 +20,12 @@ export const ConsolePaths = {
   sessions: '/api/v1/sessions/list',
   memories: '/api/v1/memories',
   candidates: '/api/v1/candidates',
+  candidateDuplicates: '/api/v1/candidates/duplicates',
   project: '/api/v1/project',
   failures: '/api/v1/failures',
   evaluation: '/api/v1/evaluation',
   members: '/api/v1/members',
-  agents: '/api/v1/agents', providers: '/api/v1/providers', providerTest: '/api/v1/providers/test', schedules: '/api/v1/schedules', analysisRuns: '/api/v1/analysis-runs', analysisRunDetail: '/api/v1/analysis-runs/detail',
+  agents: '/api/v1/agents', providers: '/api/v1/providers', providerTest: '/api/v1/providers/test', schedules: '/api/v1/schedules', scheduleTrigger: '/api/v1/schedules/trigger', analysisRuns: '/api/v1/analysis-runs', analysisRunDetail: '/api/v1/analysis-runs/detail',
 } as const;
 
 // ConsoleApi is the tenant-scoped read/write surface the console pages use. It
@@ -58,6 +60,14 @@ export class ConsoleApi {
 
   reviewCandidate(candidateId: string, action: 'confirm' | 'reject' | 'correct' | 'merge' | 'expire' | 'delete', payload: Record<string, unknown> = {}): Promise<CandidateRecord> {
     return this.client.request<CandidateRecord>(`${ConsolePaths.candidates}/${candidateId}/${action}`, { principal: this.principal, scope: this.scope() }, payload);
+  }
+
+  listDuplicateGroup(groupId: string): Promise<{ items: DuplicateGroupMember[] }> {
+    return this.client.request<{ items: DuplicateGroupMember[] }>(
+      ConsolePaths.candidateDuplicates,
+      { principal: this.principal, scope: this.scope() },
+      { group_id: groupId },
+    );
   }
 
   debugProjection(query: string, sessionId?: string): Promise<ProjectionDebug> {
@@ -110,6 +120,9 @@ export class ConsoleApi {
   }
   updateSchedule(input: ScheduleUpdate): Promise<unknown> {
     return this.client.request(ConsolePaths.schedules, { principal: this.principal, scope: this.scope() }, input, 'PUT');
+  }
+  triggerSchedule(name: string): Promise<{ name: string; requested: boolean }> {
+    return this.client.request<{ name: string; requested: boolean }>(ConsolePaths.scheduleTrigger, { principal: this.principal, scope: this.scope() }, { name });
   }
   listAnalysisRuns(page = 1, pageSize = 20): Promise<Page<AnalysisRun>> {
     return this.client.request<Page<AnalysisRun>>(ConsolePaths.analysisRuns, { principal: this.principal, scope: this.scope() }, { page, page_size: pageSize });

@@ -4,6 +4,8 @@ import { ApiClientError } from '../api/client';
 import type { CandidateRecord } from '../api/types';
 import { StateView } from '../components/states';
 import { useI18n } from '../i18n';
+import { DuplicateGroupDialog } from './DuplicateGroupDialog';
+import { MergeCandidateDialog } from './MergeCandidateDialog';
 
 export type ReviewAction = 'confirm' | 'reject' | 'correct' | 'merge' | 'expire' | 'delete';
 
@@ -28,6 +30,8 @@ export function CandidateReviewPage({ api }: CandidateReviewPageProps) {
   const [candidates, setCandidates] = useState<CandidateRecord[]>([]);
   const [rollback, setRollback] = useState<ReviewOutcome>();
   const [conflict, setConflict] = useState<string>();
+  const [duplicateGroup, setDuplicateGroup] = useState<string>();
+  const [mergeTarget, setMergeTarget] = useState<CandidateRecord>();
 
   const load = useCallback(() => {
     setStatus('loading');
@@ -103,9 +107,14 @@ export function CandidateReviewPage({ api }: CandidateReviewPageProps) {
               </span>
             ) : null}
             {candidate.triage_group ? (
-              <span data-testid={`candidate-duplicate-${candidate.id}`}>
+              <button
+                type="button"
+                className="run-link"
+                data-testid={`candidate-duplicate-${candidate.id}`}
+                onClick={() => setDuplicateGroup(candidate.triage_group)}
+              >
                 {t('review.duplicate')}: {candidate.triage_group}
-              </span>
+              </button>
             ) : null}
             {candidate.triage_rationale ? (
               <span data-testid={`candidate-triage-${candidate.id}`}>
@@ -118,13 +127,26 @@ export function CandidateReviewPage({ api }: CandidateReviewPageProps) {
               </span>
             ) : null}
             {ACTIONS.map((action) => (
-              <button key={action} onClick={() => void decide(candidate, action)}>
+              <button key={action} onClick={() => (action === 'merge' ? setMergeTarget(candidate) : void decide(candidate, action))}>
                 {t(`review.action.${action}`)}
               </button>
             ))}
           </li>
         ))}
       </ul>
+      {duplicateGroup ? <DuplicateGroupDialog api={api} groupId={duplicateGroup} onClose={() => setDuplicateGroup(undefined)} /> : null}
+      {mergeTarget ? (
+        <MergeCandidateDialog
+          api={api}
+          candidate={mergeTarget}
+          peers={candidates.filter((item) => item.id !== mergeTarget.id)}
+          onClose={() => setMergeTarget(undefined)}
+          onMerged={() => {
+            setMergeTarget(undefined);
+            load();
+          }}
+        />
+      ) : null}
     </section>
   );
 }

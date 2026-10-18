@@ -110,6 +110,17 @@ export interface CandidateRecord extends MemoryRecord {
   triage_rationale?: string;
 }
 
+// DuplicateGroupMember is one memory in an advisory duplicate group, returned by
+// the candidate review surface when a reviewer opens a suspected duplicate.
+export interface DuplicateGroupMember {
+  id: string;
+  status: string;
+  scope_type: string;
+  confidence: number;
+  content: string;
+  created_at: string;
+}
+
 export interface RankingReason {
   relevance: number;
   confidence: number;

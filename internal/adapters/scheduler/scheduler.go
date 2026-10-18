@@ -37,6 +37,14 @@ type ScheduleEnsurer interface {
 	Ensure(ctx context.Context, tenantID, name string, cadence time.Duration, enabled bool) error
 }
 
+// ManualTriggerStore consumes pending manual run requests so an operator can
+// fire a schedule without waiting for its cadence. It is optional: when the
+// configured Overrides store does not implement it, manual triggers are simply
+// unavailable.
+type ManualTriggerStore interface {
+	ConsumeRunRequests(ctx context.Context) ([]ports.ScheduleTrigger, error)
+}
+
 // StatusRecorder persists a schedule's last outcome so an out-of-process
 // console can display it. It is optional.
 type StatusRecorder interface {
@@ -216,6 +224,7 @@ func (s *Scheduler) loop(ctx context.Context) {
 }
 
 func (s *Scheduler) tick(ctx context.Context) {
+	s.runRequested(ctx, s.options.Clock())
 	tenants, err := s.options.Tenants.ActiveTenants(ctx)
 	if err != nil {
 		if s.options.Logger != nil {
@@ -240,6 +249,56 @@ func (s *Scheduler) tick(ctx context.Context) {
 			state.nextRun = now.Add(state.cadence)
 			due = append(due, pending{state: state, job: e.job})
 		}
+	}
+	s.mu.Unlock()
+	for _, item := range due {
+		s.run(ctx, item.state, item.job)
+	}
+}
+
+// runRequested fires schedules an operator asked to run now. It runs before the
+// cadence walk so a manual trigger is not delayed by a due-time check; the
+// request flag is claimed atomically by the store, so multiple replicas never
+// double-run one request.
+func (s *Scheduler) runRequested(ctx context.Context, now time.Time) {
+	store, ok := s.options.Overrides.(ManualTriggerStore)
+	if !ok || store == nil {
+		return
+	}
+	triggers, err := store.ConsumeRunRequests(ctx)
+	if err != nil {
+		if s.options.Logger != nil {
+			s.options.Logger.Error("consume manual run requests failed", slog.String("error", err.Error()))
+		}
+		return
+	}
+	if len(triggers) == 0 {
+		return
+	}
+	s.mu.Lock()
+	type pending struct {
+		state *tenantState
+		job   ports.ScheduledJob
+	}
+	var due []pending
+	for _, trigger := range triggers {
+		e, ok := s.entries[trigger.Name]
+		if !ok {
+			if s.options.Logger != nil {
+				s.options.Logger.Warn("manual run for unknown schedule", slog.String("tenant", trigger.TenantID), slog.String("schedule", trigger.Name))
+			}
+			continue
+		}
+		state := s.stateFor(ctx, e, trigger.TenantID, now)
+		if state == nil || !state.enabled || state.running {
+			if s.options.Logger != nil {
+				s.options.Logger.Warn("manual run skipped", slog.String("tenant", trigger.TenantID), slog.String("schedule", trigger.Name), slog.Bool("enabled", state != nil && state.enabled), slog.Bool("running", state != nil && state.running))
+			}
+			continue
+		}
+		state.running = true
+		state.nextRun = now.Add(state.cadence)
+		due = append(due, pending{state: state, job: e.job})
 	}
 	s.mu.Unlock()
 	for _, item := range due {

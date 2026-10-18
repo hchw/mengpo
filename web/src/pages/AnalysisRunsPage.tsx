@@ -5,11 +5,13 @@ import { Pagination } from '../components/Pagination';
 import { StateView } from '../components/states';
 import { useI18n } from '../i18n';
 import { AnalysisRunDetailDialog } from './AnalysisRunDetailDialog';
+import { TriggerSchedulesDialog } from './TriggerSchedulesDialog';
 
 const PAGE_SIZE = 20;
 
 export interface AnalysisRunsPageProps {
   api: ConsoleApi;
+  role?: string;
 }
 
 function formatTime(value: string): string {
@@ -20,12 +22,17 @@ function formatTime(value: string): string {
 // AnalysisRunsPage is the curation record: every Memory LLM run plus the
 // tenant's own curation schedule, so operators can see what ran and when it
 // next runs without a separate scheduler page.
-export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
+export function AnalysisRunsPage({ api, role }: AnalysisRunsPageProps) {
   const { t, tEnum } = useI18n();
+  // Manual triggers write the schedule, so they match the provider-write gate:
+  // tenant owners and administrators only.
+  const isAdmin = role === undefined || role === 'owner' || role === 'admin' || role === 'administrator' || role === 'tenant-admin';
   const [status, setStatus] = useState<'loading' | 'empty' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<unknown>();
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const [schedule, setSchedule] = useState<ScheduleStatus>();
+  const [schedules, setSchedules] = useState<ScheduleStatus[]>([]);
+  const [triggerOpen, setTriggerOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [nonce, setNonce] = useState(0);
@@ -44,6 +51,7 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
         setRuns(items);
         setTotal(runsPage.total ?? items.length);
         setSchedule((schedules.items ?? [])[0]);
+        setSchedules(schedules.items ?? []);
         setStatus((runsPage.total ?? items.length) === 0 ? 'empty' : 'ready');
       })
       .catch((cause) => {
@@ -78,7 +86,14 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
   const failing = schedule && schedule.last_status === 'error';
   return (
     <section aria-labelledby="analysis-runs-title" className="page page--runs">
-      <h1 id="analysis-runs-title">{t('curation.title')}</h1>
+      <div className="page-head">
+        <h1 id="analysis-runs-title">{t('curation.title')}</h1>
+        {isAdmin ? (
+          <button type="button" className="btn btn-primary" data-testid="curation-trigger-open" onClick={() => setTriggerOpen(true)}>
+            {t('curation.runNow')}
+          </button>
+        ) : null}
+      </div>
       {schedule ? (
         <dl data-testid="curation-schedule" data-failing={failing ? 'true' : 'false'}>
           <dt>{t('curation.cadence')}</dt>
@@ -136,6 +151,14 @@ export function AnalysisRunsPage({ api }: AnalysisRunsPageProps) {
       )}
       {detailRunId ? (
         <AnalysisRunDetailDialog detail={detail} loading={detailLoading} error={detailError} onClose={closeDetail} />
+      ) : null}
+      {triggerOpen ? (
+        <TriggerSchedulesDialog
+          api={api}
+          schedules={schedules}
+          onClose={() => setTriggerOpen(false)}
+          onTriggered={() => setNonce((value) => value + 1)}
+        />
       ) : null}
     </section>
   );

@@ -264,3 +264,83 @@ func TestSnapshotIsTenantScoped(t *testing.T) {
 		t.Fatalf("Snapshot(tenant-b) = %#v, err = %v", empty, err)
 	}
 }
+
+// triggerStore extends the schedule store with a pending manual-run queue so a
+// test can ask for an out-of-band run.
+type triggerStore struct {
+	fakeScheduleStore
+	mu      sync.Mutex
+	pending []ports.ScheduleTrigger
+}
+
+func (s *triggerStore) ConsumeRunRequests(context.Context) ([]ports.ScheduleTrigger, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.pending
+	s.pending = nil
+	return out, nil
+}
+
+func TestSchedulerRunsManualTriggerAheadOfCadence(t *testing.T) {
+	// A schedule that is not due for an hour must still fire when an operator
+	// requests it, and the request must be consumed exactly once.
+	job := &countingJob{name: "near-duplicate"}
+	store := &triggerStore{
+		fakeScheduleStore: fakeScheduleStore{
+			schedule: ports.Schedule{Name: "near-duplicate", Cadence: 24 * time.Hour, Enabled: true, NextRun: time.Now().Add(time.Hour)},
+			ok:       true,
+		},
+		pending: []ports.ScheduleTrigger{{TenantID: "tenant-a", Name: "near-duplicate"}},
+	}
+	s := New(Options{Tenants: fakeTenants{tenants: []string{"tenant-a"}}, Overrides: store, TickPeriod: 5 * time.Millisecond})
+	if err := s.Register(job, ports.Schedule{Name: "near-duplicate", Cadence: 24 * time.Hour, Enabled: true}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for job.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	_ = s.Stop(stopCtx)
+	if job.count() == 0 {
+		t.Fatal("a manual trigger must run without waiting for the cadence")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.pending) != 0 {
+		t.Fatalf("trigger was not consumed: %#v", store.pending)
+	}
+}
+
+func TestSchedulerSkipsManualTriggerForDisabledSchedule(t *testing.T) {
+	job := &countingJob{name: "disabled"}
+	store := &triggerStore{
+		fakeScheduleStore: fakeScheduleStore{
+			schedule: ports.Schedule{Name: "disabled", Cadence: 24 * time.Hour, Enabled: false, NextRun: time.Now().Add(time.Hour)},
+			ok:       true,
+		},
+		pending: []ports.ScheduleTrigger{{TenantID: "tenant-a", Name: "disabled"}},
+	}
+	s := New(Options{Tenants: fakeTenants{tenants: []string{"tenant-a"}}, Overrides: store, TickPeriod: 5 * time.Millisecond})
+	if err := s.Register(job, ports.Schedule{Name: "disabled", Cadence: 24 * time.Hour, Enabled: false}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	_ = s.Stop(stopCtx)
+	if job.count() != 0 {
+		t.Fatalf("a disabled schedule must not run on a manual trigger, ran %d times", job.count())
+	}
+}

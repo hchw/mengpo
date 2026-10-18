@@ -83,6 +83,51 @@ WHERE tenant_id = $1 AND name = $2`, tenantID, name, at.UTC(), status, errMessag
 	return err
 }
 
+// RequestRun records a manual run request so the scheduler fires this schedule
+// on its next tick, independent of the cadence. The flag is persisted in the
+// platform schema because the scheduler runs in a different process from the
+// console that serves the request.
+func (s *TenantScheduleStore) RequestRun(ctx context.Context, tenantID, name string) error {
+	if tenantID == "" || name == "" {
+		return errors.New("manual run requires tenant and schedule name")
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE tenant_schedules
+SET run_requested_at = now(), updated_at = now()
+WHERE tenant_id = $1 AND name = $2`, tenantID, name)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ports.ErrScheduleNotFound
+	}
+	return nil
+}
+
+// ConsumeRunRequests atomically claims every pending manual run request and
+// clears it. Row locking guarantees that across replicas exactly one scheduler
+// claims each request, and the callback is never invoked twice for one request.
+func (s *TenantScheduleStore) ConsumeRunRequests(ctx context.Context) ([]ports.ScheduleTrigger, error) {
+	rows, err := s.db.QueryContext(ctx, `
+UPDATE tenant_schedules
+SET run_requested_at = NULL, updated_at = now()
+WHERE run_requested_at IS NOT NULL
+RETURNING tenant_id::text, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var triggers []ports.ScheduleTrigger
+	for rows.Next() {
+		var trigger ports.ScheduleTrigger
+		if err := rows.Scan(&trigger.TenantID, &trigger.Name); err != nil {
+			return nil, err
+		}
+		triggers = append(triggers, trigger)
+	}
+	return triggers, rows.Err()
+}
+
 // List returns the tenant's persisted schedule state.
 func (s *TenantScheduleStore) List(ctx context.Context, tenantID string) ([]ports.ScheduleStatus, error) {
 	rows, err := s.db.QueryContext(ctx, `
@@ -116,4 +161,6 @@ FROM tenant_schedules WHERE tenant_id = $1 ORDER BY name`, tenantID)
 var _ interface {
 	Load(context.Context, string, string) (ports.Schedule, bool, error)
 	Upsert(context.Context, string, string, time.Duration, bool) error
+	RequestRun(context.Context, string, string) error
+	ConsumeRunRequests(context.Context) ([]ports.ScheduleTrigger, error)
 } = (*TenantScheduleStore)(nil)

@@ -47,6 +47,10 @@ func (c *ConsoleOps) writeOpsError(w http.ResponseWriter, r *http.Request, err e
 // ScheduleAdmin reads and writes a tenant's own schedule overrides.
 type ScheduleAdmin interface {
 	Upsert(ctx context.Context, tenantID, name string, cadence time.Duration, enabled bool) error
+	// RequestRun asks the worker's scheduler to fire this schedule now instead
+	// of waiting for its cadence. It returns ports.ErrScheduleNotFound when the
+	// tenant has no such schedule.
+	RequestRun(ctx context.Context, tenantID, name string) error
 }
 
 // Register mounts the operational endpoints.
@@ -64,6 +68,7 @@ func (c *ConsoleOps) Register(mux *http.ServeMux) {
 	}
 	if c.Schedules != nil {
 		mux.HandleFunc("PUT /api/v1/schedules", c.handleScheduleUpdate)
+		mux.HandleFunc("POST /api/v1/schedules/trigger", c.handleScheduleTrigger)
 	}
 	if c.Runs != nil {
 		mux.HandleFunc("POST /api/v1/analysis-runs", c.handleAnalysisRuns)
@@ -213,6 +218,46 @@ func (c *ConsoleOps) handleScheduleUpdate(w http.ResponseWriter, r *http.Request
 		"cadence_seconds": payload.CadenceSeconds, "enabled": payload.Enabled,
 	})
 	writeAPIData(w, http.StatusOK, map[string]any{"name": payload.Name, "cadence_seconds": payload.CadenceSeconds, "enabled": payload.Enabled})
+}
+
+type scheduleTriggerPayload struct {
+	Name string `json:"name"`
+}
+
+// handleScheduleTrigger requests an immediate, out-of-band run of one schedule.
+// The worker's scheduler claims the request within its next tick; the response
+// is accepted, not completed, so the console can refresh the run record after.
+func (c *ConsoleOps) handleScheduleTrigger(w http.ResponseWriter, r *http.Request) {
+	envelope, scoped, err := bindConsoleRequest(r)
+	if err != nil {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if !callerIsAdmin(r) {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "a tenant administrator is required")
+		return
+	}
+	var payload scheduleTriggerPayload
+	if len(envelope.Payload) > 0 {
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "trigger payload is invalid")
+			return
+		}
+	}
+	if payload.Name == "" {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "schedule name is required")
+		return
+	}
+	if err := c.Schedules.RequestRun(r.Context(), scoped.TenantID, payload.Name); err != nil {
+		if errors.Is(err, ports.ErrScheduleNotFound) {
+			writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "schedule not found")
+			return
+		}
+		c.writeOpsError(w, r, err, "unable to request a run")
+		return
+	}
+	c.recordAudit(r, scoped, envelope.RequestID, "schedule.trigger", "schedule", payload.Name, map[string]any{"requested": true})
+	writeAPIData(w, http.StatusAccepted, map[string]any{"name": payload.Name, "requested": true})
 }
 
 // AnalysisRunLister pages the curation record for the console. It needs both a

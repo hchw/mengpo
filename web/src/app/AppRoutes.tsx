@@ -131,7 +131,7 @@ export function AppRoutes({ api, authenticatedOverride }: AppRoutesProps) {
               <Route path="/failures" element={<FailureAnalysisPage api={consoleApi} />} />
               <Route path="/evaluation" element={<MemoryEvaluationPage api={consoleApi} />} />
               <Route path="/members" element={<MembersPage api={consoleApi} role={activeTenant?.role ?? 'member'} currentUserId={auth.user?.id} />} />
-              <Route path="/curation" element={<AnalysisRunsPage api={consoleApi} />} />
+              <Route path="/curation" element={<AnalysisRunsPage api={consoleApi} role={activeTenant?.role} />} />
               <Route path="/settings" element={<SettingsPage tenant={activeTenant} api={consoleApi} role={activeTenant?.role} />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

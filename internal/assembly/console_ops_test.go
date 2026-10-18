@@ -57,6 +57,16 @@ type opsSchedules struct {
 		cadence      time.Duration
 		enabled      bool
 	}
+	requests   []string
+	requestErr error
+}
+
+func (f *opsSchedules) RequestRun(_ context.Context, tenantID, name string) error {
+	if f.requestErr != nil {
+		return f.requestErr
+	}
+	f.requests = append(f.requests, tenantID+"|"+name)
+	return nil
 }
 
 func (f *opsSchedules) Upsert(_ context.Context, tenantID, name string, cadence time.Duration, enabled bool) error {
@@ -242,6 +252,16 @@ func TestScheduleAndAnalysisRunEndpoints(t *testing.T) {
 	}))
 	if status != http.StatusOK || len(schedules.upserts) != 1 || schedules.upserts[0].tenant != "tenant-a" {
 		t.Fatalf("schedule update = %#v status=%d", schedules.upserts, status)
+	}
+
+	status, body = opsRequest(t, handler, http.MethodPost, "/api/v1/schedules/trigger", consoleEnvelope("tenant-a", "user-1", "req-trigger", map[string]any{
+		"name": "near-duplicate",
+	}))
+	if status != http.StatusAccepted || len(schedules.requests) != 1 || schedules.requests[0] != "tenant-a|near-duplicate" {
+		t.Fatalf("schedule trigger = %#v status=%d", schedules.requests, status)
+	}
+	if body["data"].(map[string]any)["requested"] != true {
+		t.Fatalf("schedule trigger body = %#v", body)
 	}
 
 	status, body = opsRequest(t, handler, http.MethodPost, "/api/v1/analysis-runs", consoleEnvelope("tenant-a", "user-1", "req-3", map[string]any{}))

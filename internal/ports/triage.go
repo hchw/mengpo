@@ -28,6 +28,21 @@ type CandidateTriageWriter interface {
 // review surface can show the model's advisory suggestion next to the evidence.
 type CandidateTriageReader interface {
 	LatestCandidateTriage(ctx context.Context, tenantID string, memoryIDs []string) (map[string]CandidateTriageRecord, error)
+	// DuplicateGroupMembers returns every memory whose latest finding shares the
+	// given duplicate group, so a reviewer can see what a suspected duplicate
+	// actually says before deciding.
+	DuplicateGroupMembers(ctx context.Context, tenantID, groupID string) ([]DuplicateGroupMember, error)
+}
+
+// DuplicateGroupMember is one memory in an advisory duplicate group.
+type DuplicateGroupMember struct {
+	MemoryID   string
+	Status     string
+	ScopeType  string
+	ScopeID    string
+	Confidence float64
+	Content    string
+	CreatedAt  time.Time
 }
 
 // MemoryRelationWriter records memory-to-memory lineage without a governance

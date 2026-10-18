@@ -75,6 +75,10 @@ func (f fakeTriageReader) LatestCandidateTriage(_ context.Context, _ string, mem
 	return out, nil
 }
 
+func (f fakeTriageReader) DuplicateGroupMembers(_ context.Context, _, _ string) ([]ports.DuplicateGroupMember, error) {
+	return nil, nil
+}
+
 func mergeSeeds() []ports.MemoryNodeRecord {
 	return []ports.MemoryNodeRecord{
 		{ID: "a", UserID: "u1", ScopeType: "user-global", ScopeID: "u1", Status: "candidate", Confidence: 0.5, ContentText: "prefers dark mode", Content: json.RawMessage(`{"text":"prefers dark mode"}`), CreatedAt: time.Unix(1, 0).UTC()},

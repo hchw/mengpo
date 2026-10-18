@@ -2,8 +2,14 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrScheduleNotFound reports a manual run request for a schedule this tenant
+// does not have. Callers surface it to the operator instead of silently
+// dropping the request.
+var ErrScheduleNotFound = errors.New("schedule not found")
 
 // Schedule declares a periodic maintenance job's default cadence. Each tenant
 // owns its own schedules; defaults are overridable per tenant (see the tenant
@@ -35,6 +41,13 @@ type ScheduleStatus struct {
 	LastDuration time.Duration
 	LastError    string
 	Runs         int64
+}
+
+// ScheduleTrigger is one pending manual run request: an operator asked this
+// (tenant, schedule) to fire now instead of waiting for its cadence.
+type ScheduleTrigger struct {
+	TenantID string
+	Name     string
 }
 
 // Scheduler runs registered jobs periodically, per tenant. Implementations must

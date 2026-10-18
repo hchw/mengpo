@@ -114,3 +114,43 @@ ORDER BY memory_id, created_at DESC, id DESC`, uuidArrayLiteral(memoryIDs))
 	}
 	return result, nil
 }
+
+// DuplicateGroupMembers returns the memories whose latest triage finding shares
+// the given duplicate group. Group ids are opaque (a node id or a content
+// digest), so the lookup is a text equality against the latest finding per
+// memory; older findings for the same memory are ignored.
+func (r *TriageRepository) DuplicateGroupMembers(ctx context.Context, tenantID, groupID string) ([]ports.DuplicateGroupMember, error) {
+	if tenantID == "" || groupID == "" {
+		return nil, nil
+	}
+	var result []ports.DuplicateGroupMember
+	err := r.router.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+WITH latest AS (
+	SELECT DISTINCT ON (memory_id) memory_id, duplicate_group
+	FROM candidate_triage
+	ORDER BY memory_id, created_at DESC, id DESC
+)
+SELECT m.id::text, m.status, m.scope_type, m.scope_id::text, m.confidence, COALESCE(m.content_text, ''), m.created_at
+FROM latest
+JOIN memory_nodes m ON m.id = latest.memory_id
+WHERE latest.duplicate_group = $1
+ORDER BY m.created_at, m.id`, groupID)
+		if err != nil {
+			return fmt.Errorf("query duplicate group: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var member ports.DuplicateGroupMember
+			if err := rows.Scan(&member.MemoryID, &member.Status, &member.ScopeType, &member.ScopeID, &member.Confidence, &member.Content, &member.CreatedAt); err != nil {
+				return err
+			}
+			result = append(result, member)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}

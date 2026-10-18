@@ -132,9 +132,22 @@ describe('CandidateReviewPage', () => {
     });
     render(<CandidateReviewPage api={api} />);
     await waitFor(() => expect(screen.getByTestId('candidate-c1')).toBeInTheDocument());
-    await user.click(screen.getByRole('button', { name: 'merge' }));
+    await user.click(screen.getByRole('button', { name: 'confirm' }));
     await waitFor(() => expect(screen.getByText('Conflicting change')).toBeInTheDocument());
     expect(screen.getByTestId('candidate-c1')).toBeInTheDocument();
+  });
+
+  it('merges a selected candidate into the target with an explicit payload', async () => {
+    const api = fakeConsoleApi({ listCandidates: async () => page([candidate('c1'), candidate('c2')]) });
+    render(<CandidateReviewPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('candidate-c1')).toBeInTheDocument());
+
+    await user.click(within(screen.getByTestId('candidate-c1')).getByRole('button', { name: 'merge' }));
+    await waitFor(() => expect(screen.getByTestId('merge-candidate-dialog')).toBeInTheDocument());
+    await user.click(screen.getByTestId('merge-option-c2'));
+    await user.click(screen.getByTestId('merge-submit'));
+
+    await waitFor(() => expect(api.reviewCandidate).toHaveBeenCalledWith('c1', 'merge', { target_memory_id: 'c1', duplicate_memory_ids: ['c2'] }));
   });
 
   it('shows the suspected duplicate group', async () => {
@@ -142,6 +155,23 @@ describe('CandidateReviewPage', () => {
     render(<CandidateReviewPage api={api} />);
     await waitFor(() => expect(screen.getByTestId('candidate-duplicate-c1')).toBeInTheDocument());
     expect(screen.getByTestId('candidate-duplicate-c1').textContent).toContain('group-42');
+  });
+
+  it('opens the duplicate group contents from the suspected-duplicate link', async () => {
+    const listDuplicateGroup = vi.fn(async () => ({
+      items: [
+        { id: 'c1', status: 'candidate', scope_type: 'user-global', confidence: 0.9, content: 'prefers a dark terminal', created_at: '2024-01-01T00:00:00Z' },
+        { id: 'c2', status: 'candidate', scope_type: 'user-global', confidence: 0.8, content: 'likes a dark theme', created_at: '2024-01-02T00:00:00Z' },
+      ],
+    }));
+    const api = fakeConsoleApi({ listCandidates: async () => page([candidate('c1', { triage_group: 'group-42' })]), listDuplicateGroup });
+    render(<CandidateReviewPage api={api} />);
+    await waitFor(() => expect(screen.getByTestId('candidate-duplicate-c1')).toBeInTheDocument());
+
+    await user.click(screen.getByTestId('candidate-duplicate-c1'));
+    await waitFor(() => expect(listDuplicateGroup).toHaveBeenCalledWith('group-42'));
+    await waitFor(() => expect(screen.getByTestId('duplicate-group-member-c1')).toBeInTheDocument());
+    expect(screen.getByTestId('duplicate-group-member-c2').textContent).toContain('likes a dark theme');
   });
 });
 
@@ -339,5 +369,21 @@ describe('AnalysisRunsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Close' }));
     expect(screen.queryByTestId('run-detail')).toBeNull();
+  });
+
+  it('triggers a curation task from the single run-now entry point', async () => {
+    const api = fakeConsoleApi({
+      listSchedules: vi.fn(async () => ({ items: [scheduleStatus(), scheduleStatus({ name: 'near-duplicate' })] })),
+    });
+    render(<AnalysisRunsPage api={api} role="owner" />);
+    await waitFor(() => expect(screen.getByTestId('curation-trigger-open')).toBeInTheDocument());
+
+    await user.click(screen.getByTestId('curation-trigger-open'));
+    await waitFor(() => expect(screen.getByTestId('curation-trigger-dialog')).toBeInTheDocument());
+    expect(screen.getByTestId('curation-trigger-row-near-duplicate')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('curation-run-near-duplicate'));
+    await waitFor(() => expect(api.triggerSchedule).toHaveBeenCalledWith('near-duplicate'));
+    expect(await screen.findByTestId('curation-requested-near-duplicate')).toBeInTheDocument();
   });
 });
